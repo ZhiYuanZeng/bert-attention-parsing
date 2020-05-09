@@ -1,6 +1,6 @@
 from torch.utils.data import Dataset
 import torch
-import collections
+from collections import Sequence, defaultdict
 import os
 import logging
 logger = logging.getLogger(__name__)
@@ -15,6 +15,11 @@ word_tags = {
             'OD','ON','P','PN','SB','SP','VA','VC','VE','VV'
     ])
 }
+# en_label2idx={"empty": 0, "NP": 1, "ADJP": 2, "PP": 3, "VP": 4, "S": 5, "UCP": 6, "RRC": 7, "QP": 8,
+#  "ADVP": 9, "SBAR": 10, "SINV": 11, "NAC": 12, "FRAG": 13, "CONJP": 14, "PRN": 15, "WHPP": 16, "NX": 17, 
+#  "WHNP": 18, "SBARQ": 19, "SQ": 20, "INTJ": 21, "X": 22, "WHADVP": 23, "WHADJP": 24, "PRT": 25}
+en_label2idx=defaultdict(int, {"empty": 1})
+en_idx2label=defaultdict(str, {1: "empty"})
 
 ctb_dir='/home/zyzeng/nltk_data/corpora/ctb/cleaned/'
 
@@ -63,7 +68,7 @@ def collate_fn(batch):
     if isinstance(batch[0], torch.Tensor):
         out = None
         return torch.stack(batch, 0, out=out)
-    elif isinstance(batch[0], collections.Sequence):
+    elif isinstance(batch[0], Sequence):
         transposed = zip(*batch)
         results = []
         for samples in transposed:

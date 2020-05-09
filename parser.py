@@ -1,5 +1,12 @@
 import numpy as np
 import random
+import math
+
+def _get_entropy(score):
+    score=np.exp(score)
+    dist=score/score.sum() # softmax
+    entropy=-(dist*np.log(dist+1e-6)).sum() # -sum(plogp)
+    return entropy
 
 def parse_cyk(split_score,sent):
     """ 
@@ -19,19 +26,23 @@ def parse_cyk(split_score,sent):
     L=len(sent)
     splits=np.zeros([L,L])
     tree_score=np.zeros([L,L])
-
     for w in range(2,L+1): # [2,L]
         for i in range(L):
             j=i+w-1
             if j>=L: continue
             maxv=float('-inf')
+            # split_score_one_span=np.zeros([j-i])
             for k in range(i,j): # [i,j)
                 s=split_score[i,j,k]
                 s+=tree_score[i,k]+tree_score[k+1,j]
+                # split_score_one_span[k-i]=s
                 if maxv<s:
                     splits[i,j]=k
                     maxv=s
             tree_score[i,j]=maxv
+            # entropy_of_score=_get_entropy(split_score_one_span)
+            # if entropy_of_score>math.log(j-i)*0.8:
+            #     splits[i,j]=i
     tree=build_tree(splits,sent,0,L-1) 
     return tree
         

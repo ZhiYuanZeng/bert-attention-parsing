@@ -5,7 +5,6 @@ from utils.parse_utils import evalb, MRG, MRG_labeled, comp_tree
 from dataloader.supervised_data import load_datasets as supervised_load_datasets
 from utils.parse_comparison import corpus_stats_labeled, corpus_average_depth
 from utils.data_utils import collate_fn
-from utils.visualize import visual_attention
 import logging
 import argparse
 import numpy as np
@@ -22,7 +21,7 @@ except:
     from tensorboardX import SummaryWriter
 
 logger = logging.getLogger(__name__)
-file_to_print=open('unsupervised_res.txt','a')
+file_to_print=open('eval_all_heads.txt','a')
 
 def pos_scale(max_seq_length, W=2):
     """ make atten local by multiply atten with gasussian
@@ -76,9 +75,7 @@ def unsupervised_parsing(args, model, tokenizer, prefix=""):
             outputs = model(**inputs)
             _,_, hiddens, attentions = outputs  # (layer_nb,bsz,head,m,m)
             hiddens = hiddens[args.layer_nb]
-            # attentions=attentions[args.layer_nb][:,args.head_nb]
-            random_layer,random_head=random.randint(0,11),random.randint(0,11)
-            attentions=attentions[random_layer][:,random_head]
+            attentions=attentions[args.layer_nb][:,args.head_nb]
             # attentions=(attentions[9][:,3]+attentions[7][:,10])/2
             # attentions2 = attentions[7][:,10]
             # scores=[(s1+s2)/2 for s1,s2 in zip(scores1,scores2)]
@@ -93,13 +90,9 @@ def unsupervised_parsing(args, model, tokenizer, prefix=""):
                 scores = split_score(h, a, bpe_ids[i], args.relevance_type, args.norm)
                 tree = parse_cyk(scores, s)
                 pred_trees.append(tree)
-                if ' '.join(strings[i]).startswith('under an agreement signed'):
-                    visual_attention([a.cpu().numpy(),],[strings[i],],'attention-random')
-                    pass
-
 
             # evaluate
-            for i,(pred_tree, tgt_tree, nltk_tree) in enumerate(zip(pred_trees, tgt_trees, nltk_trees)):
+            for pred_tree, tgt_tree, nltk_tree in zip(pred_trees, tgt_trees, nltk_trees):
                 prec, reca, f1 = comp_tree(pred_tree, tgt_tree)
                 prec_list.append(prec)
                 reca_list.append(reca)

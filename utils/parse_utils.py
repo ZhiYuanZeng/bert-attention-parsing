@@ -2,11 +2,148 @@ import torch
 import numpy as np
 import nltk
 import re
-
+import math
+                                                                                                                                
 
 word_tags = set(['CC', 'CD', 'DT', 'EX', 'FW', 'IN', 'JJ', 'JJR', 'JJS', 'LS', 'MD', 'NN', 'NNS', 'NNP', 'NNPS', 'PDT',
              'POS', 'PRP', 'PRP$', 'RB', 'RBR', 'RBS', 'RP', 'SYM', 'TO', 'UH', 'VB', 'VBD', 'VBG', 'VBN', 'VBP', 'VBZ',
              'WDT', 'WP', 'WP$', 'WRB'])
+
+def evalb(pred_tree_list, targ_tree_list):
+    import os
+    import subprocess
+    import tempfile
+
+    temp_path = tempfile.TemporaryDirectory(prefix="evalb-")
+    temp_file_path = os.path.join(temp_path.name, "pred_trees.txt")
+    temp_targ_path = os.path.join(temp_path.name, "true_trees.txt")
+    temp_eval_path = os.path.join(temp_path.name, "evals.txt")
+
+    print("Temp: {}, {}".format(temp_file_path, temp_targ_path))
+    temp_tree_file = open(temp_file_path, "w")
+    temp_targ_file = open(temp_targ_path, "w")
+
+    for pred_tree, targ_tree in zip(pred_tree_list, targ_tree_list):
+        def process_str_tree(str_tree):
+            return re.sub('[ |\n]+', ' ', str_tree)
+
+        def list2tree(node):
+            if isinstance(node, list):
+                tree = []
+                for child in node:
+                    tree.append(list2tree(child))
+                return nltk.Tree('<unk>', tree)
+            elif isinstance(node, str):
+                return nltk.Tree('<word>', [node])
+        if not isinstance(pred_tree, nltk.tree.Tree):
+            pred_tree=list2tree(pred_tree)
+            targ_tree=list2tree(targ_tree)
+        # if isinstance(pred_tree, str) or isinstance(targ_tree, str): continue
+        # assert isinstance(pred_tree, nltk.tree.Tree)
+        # assert isinstance(targ_tree, nltk.tree.Tree)
+        # assert len(pred_tree.leaves())==len(targ_tree.leaves())
+        # assert len(pred_tree.leaves())==len(targ_tree.leaves())
+        # assert all(
+        #     w1.lower()==w2.lower()
+        #     for w1,w2 in zip(pred_tree.leaves(), targ_tree.leaves())
+        # )
+        temp_tree_file.write(process_str_tree(str(pred_tree).lower()) + '\n')
+        temp_targ_file.write(process_str_tree(str(targ_tree).lower()) + '\n')
+
+    temp_tree_file.close()
+    temp_targ_file.close()
+
+    evalb_dir = os.path.join(os.getcwd(), "EVALB")
+    evalb_param_path = os.path.join(evalb_dir, "COLLINS.prm")
+    evalb_program_path = os.path.join(evalb_dir, "evalb")
+    command = "{} -p {} {} {} > {}".format(
+        evalb_program_path,
+        evalb_param_path,
+        temp_targ_path,
+        temp_file_path,
+        temp_eval_path)
+
+    subprocess.run(command, shell=True)
+
+    with open(temp_eval_path) as infile:
+        for line in infile:
+            match = re.match(r"Bracketing Recall\s+=\s+(\d+\.\d+)", line)
+            if match:
+                evalb_recall = float(match.group(1))
+            match = re.match(r"Bracketing Precision\s+=\s+(\d+\.\d+)", line)
+            if match:
+                evalb_precision = float(match.group(1))
+            match = re.match(r"Bracketing FMeasure\s+=\s+(\d+\.\d+)", line)
+            if match:
+                evalb_fscore = float(match.group(1))
+                break
+    success = (
+        not math.isnan(evalb_fscore) or
+        evalb_recall == 0.0 or
+        evalb_precision == 0.0)
+
+    if success:
+        temp_path.cleanup()
+
+    print('-' * 80)
+    print('Evalb Prec:', evalb_precision,
+          ', Evalb Reca:', evalb_recall,
+          ', Evalb F1:', evalb_fscore)
+
+    return {'prec':evalb_precision,'rec':evalb_recall,"f1":evalb_fscore}
+
+def MRG(tr):
+    if isinstance(tr, str):
+        #return '(' + tr + ')'
+        return tr + ' '
+    else:
+        s = '( '
+        for subtr in tr:
+            s += MRG(subtr)
+        s += ') '
+        return s
+
+def MRG_labeled(tr):
+    if isinstance(tr, nltk.Tree):
+        if tr.label() in word_tags:
+            return tr.leaves()[0] + ' '
+        else:
+            s = '(%s ' % (re.split(r'[-=]', tr.label())[0])
+            for subtr in tr:
+                s += MRG_labeled(subtr)
+            s += ') '
+            return s
+    else:
+        return ''
+
+def get_brackets(tree, idx=0):
+    brackets = set()
+    if isinstance(tree, list) or isinstance(tree, nltk.Tree):
+        for node in tree:
+            node_brac, next_idx = get_brackets(node, idx)
+            if next_idx - idx > 1:
+                brackets.add((idx, next_idx))
+                brackets.update(node_brac)
+            idx = next_idx
+        return brackets, idx
+    else:
+        return brackets, idx + 1
+
+
+def comp_tree(parse_trees,tgt_trees):
+    """ compare a predicted tree with target tree """
+    model_out, _ = get_brackets(parse_trees)
+    std_out, _ = get_brackets(tgt_trees)
+    overlap = model_out.intersection(std_out)
+    
+    prec = float(len(overlap)) / (len(model_out) + 1e-8)
+    reca = float(len(overlap)) / (len(std_out) + 1e-8)
+    if len(std_out) == 0:
+        reca = 1.
+    if len(model_out) == 0:
+        prec = 1.
+    f1 = 2 * prec * reca / (prec + reca + 1e-8)
+    return prec,reca,f1
 
 def get_pos_mask(max_len, scale=1.0):
     positional_mask = torch.zeros([max_len, max_len])
@@ -91,125 +228,3 @@ def load_embeddings_txt(path):
     word: ind for ind, word in enumerate(index_to_word)
   }
   return matrix, word_to_index, index_to_word
-
-def evalb(pred_tree_list, targ_tree_list):
-    import os
-    import subprocess
-    import tempfile
-    import re
-    import nltk
-
-    temp_path = tempfile.TemporaryDirectory(prefix="evalb-")
-    temp_file_path = os.path.join(temp_path.name, "pred_trees.txt")
-    temp_targ_path = os.path.join(temp_path.name, "true_trees.txt")
-    temp_eval_path = os.path.join(temp_path.name, "evals.txt")
-
-    print("Temp: {}, {}".format(temp_file_path, temp_targ_path))
-    temp_tree_file = open(temp_file_path, "w")
-    temp_targ_file = open(temp_targ_path, "w")
-
-    for pred_tree, targ_tree in zip(pred_tree_list, targ_tree_list):
-        def process_str_tree(str_tree):
-            return re.sub('[ |\n]+', ' ', str_tree)
-
-        def list2tree(node):
-            if isinstance(node, list):
-                tree = []
-                for child in node:
-                    tree.append(list2tree(child))
-                return nltk.Tree('<unk>', tree)
-            elif isinstance(node, str):
-                return nltk.Tree('<word>', [node])
-
-        temp_tree_file.write(process_str_tree(str(list2tree(pred_tree)).lower()) + '\n')
-        temp_targ_file.write(process_str_tree(str(list2tree(targ_tree)).lower()) + '\n')
-
-    temp_tree_file.close()
-    temp_targ_file.close()
-
-    evalb_dir = os.path.join(os.getcwd(), "EVALB")
-    evalb_param_path = os.path.join(evalb_dir, "COLLINS.prm")
-    evalb_program_path = os.path.join(evalb_dir, "evalb")
-    command = "{} -p {} {} {} > {}".format(
-        evalb_program_path,
-        evalb_param_path,
-        temp_targ_path,
-        temp_file_path,
-        temp_eval_path)
-
-    subprocess.run(command, shell=True)
-
-    with open(temp_eval_path) as infile:
-        for line in infile:
-            match = re.match(r"Bracketing Recall\s+=\s+(\d+\.\d+)", line)
-            if match:
-                evalb_recall = float(match.group(1))
-            match = re.match(r"Bracketing Precision\s+=\s+(\d+\.\d+)", line)
-            if match:
-                evalb_precision = float(match.group(1))
-            match = re.match(r"Bracketing FMeasure\s+=\s+(\d+\.\d+)", line)
-            if match:
-                evalb_fscore = float(match.group(1))
-                break
-
-    temp_path.cleanup()
-
-    print('-' * 80)
-    print('Evalb Prec:', evalb_precision,
-          ', Evalb Reca:', evalb_recall,
-          ', Evalb F1:', evalb_fscore)
-
-    return {'prec':evalb_precision,'rec':evalb_recall,"f1":evalb_fscore}
-
-def MRG(tr):
-    if isinstance(tr, str):
-        #return '(' + tr + ')'
-        return tr + ' '
-    else:
-        s = '( '
-        for subtr in tr:
-            s += MRG(subtr)
-        s += ') '
-        return s
-
-def MRG_labeled(tr):
-    if isinstance(tr, nltk.Tree):
-        if tr.label() in word_tags:
-            return tr.leaves()[0] + ' '
-        else:
-            s = '(%s ' % (re.split(r'[-=]', tr.label())[0])
-            for subtr in tr:
-                s += MRG_labeled(subtr)
-            s += ') '
-            return s
-    else:
-        return ''
-
-def get_brackets(tree, idx=0):
-    brackets = set()
-    if isinstance(tree, list) or isinstance(tree, nltk.Tree):
-        for node in tree:
-            node_brac, next_idx = get_brackets(node, idx)
-            if next_idx - idx > 1:
-                brackets.add((idx, next_idx))
-                brackets.update(node_brac)
-            idx = next_idx
-        return brackets, idx
-    else:
-        return brackets, idx + 1
-
-
-def comp_tree(parse_trees,tgt_trees):
-    """ compare a predicted tree with target tree """
-    model_out, _ = get_brackets(parse_trees)
-    std_out, _ = get_brackets(tgt_trees)
-    overlap = model_out.intersection(std_out)
-    
-    prec = float(len(overlap)) / (len(model_out) + 1e-8)
-    reca = float(len(overlap)) / (len(std_out) + 1e-8)
-    if len(std_out) == 0:
-        reca = 1.
-    if len(model_out) == 0:
-        prec = 1.
-    f1 = 2 * prec * reca / (prec + reca + 1e-8)
-    return prec,reca,f1

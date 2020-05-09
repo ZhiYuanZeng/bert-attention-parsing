@@ -1,27 +1,28 @@
 import sys
 sys.path[0] += '/../'
 
-from utils.parse_utils import evalb, MRG, MRG_labeled, comp_tree
-from model.split_score import AttentionScore, HiddenScore
+from model.bert_head import BertHead
+from utils.parse_utils import evalb, comp_tree
 # from dataloader.unsupervised_data import load_datasets as unsupervised_load_datasets
 from dataloader.supervised_data import load_datasets as supervised_load_datasets
 from utils.parse_comparison import corpus_stats_labeled, corpus_average_depth
-from utils.data_utils import collate_fn
+from utils.data_utils import collate_fn, en_label2idx
 from utils.visualize import visual_attention,visual_hiddens
-from model.bert_head import BertHead
 
 from transformers import BertConfig, BertModel, BertTokenizer,AdamW
 from transformers import WarmupLinearSchedule as get_linear_schedule_with_warmup
-from model.bert_for_adj import BertForAdj
+# from model.bert_for_adj import BertForAdj
 import os
 import logging
 import argparse
+import re
 import numpy as np
 import random
 from tqdm import tqdm, trange
 import torch
 from torch.utils.data import DataLoader,SequentialSampler, RandomSampler
-import re
+from nltk.tree import Tree
+
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -30,109 +31,6 @@ except:
 
 logger = logging.getLogger(__name__)
 
-methods_for_split_score={
-    'attention_inner_cross':AttentionScore.inner_and_cross_score,
-    'inner':AttentionScore.inner_score,
-    'hidden_inner':HiddenScore.inner_score,
-    'attention_cros':AttentionScore.cross_score,
-    'hidden_cross':HiddenScore.cross_score,
-}
-
-
-def unsupervised_parsing(args, model, tokenizer, prefix=""):
-    """ 
-    return attention of every batch
-        -get input
-        -get output and ground truth
-        -compute evaluate score
-    """
-    # load data
-    eval_outputs_dirs = args.output_dir
-    
-    eval_dataset = supervised_load_datasets(args, tokenizer)
-    args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
-    eval_dataloader = DataLoader(
-        eval_dataset, batch_size=args.eval_batch_size, collate_fn=collate_fn)
-
-    # positional_mask = get_pos_mask(
-    #     args.max_seq_length, scale=0.1).to(args.device)
-    if args.n_gpu > 1:
-        model = torch.nn.DataParallel(model)
-    
-    # Eval!
-    pred_tree_list, targ_tree_list, prec_list, reca_list, f1_list = [], [], [], [], []
-    corpus_sys, corpus_ref = {}, {}
-    sample_count = 0
-
-    for i, batch in enumerate(tqdm(eval_dataloader, desc="parsing")):
-        model.eval()
-        with torch.no_grad():
-            input_ids, attention_mask, bpe_ids, tgt_trees, nltk_trees = batch
-
-            inputs = {'input_ids':      input_ids,
-                      'attention_mask': attention_mask,
-                      }
-            outputs = model(**inputs)
-            _,_, hiddens, attentions = outputs  # (layer_nb,bsz,head,m,m)
-            # attentions = (attentions[7][:,10]+attentions[9][:,3])/2
-            attentions1 = attentions[9][:,3]
-            attentions2 = attentions[7][:,10]
-            method=methods_for_split_score[args.method]
-            scores1 = method(attentions1, bpe_ids)
-            scores2 = method(attentions2, bpe_ids)
-            scores=[(s1+s2)/2 for s1,s2 in zip(scores1,scores2)]
-            tokens = [[tokenizer.convert_ids_to_tokens(id.item()) for id in ids[1:len(torch.nonzero(masks))-1]]
-                    for ids, masks in zip(batch[0], batch[1])]
-            strings = [tokenizer.convert_tokens_to_string(
-                tks).split() for tks in tokens]
-            parse_trees = Parser.parse_cyk(scores1, strings)
-
-            # evaluate
-            pred_tree_list += parse_trees
-            targ_tree_list += tgt_trees
-            for pred_tree, tgt_tree, nltk_tree in zip(parse_trees, tgt_trees, nltk_trees):
-                prec, reca, f1 = comp_tree(pred_tree, tgt_tree)
-                prec_list.append(prec)
-                reca_list.append(reca)
-                f1_list.append(f1)
-                corpus_sys[sample_count] = MRG(pred_tree)
-                corpus_ref[sample_count] = MRG_labeled(nltk_tree)
-                sample_count += 1
-            print(f'f1 score:{sum(f1_list)/len(f1_list)}')
-                # if f1 < 0.4 and sample_count % args.logging_steps == 0:
-                #     logger.info('{}\nModel output: {}'.format(
-                #         '*'*50, pred_tree))
-                #     logger.info('\ntgt_tree: {}'.format(tgt_tree))
-                #     logger.info('\nPrec: %f, Reca: %f, F1: %f' %
-                #                 (prec, reca, f1))
-    
-    # visual_matrix(-all_tree_distance[:30,:30],'figures/distances/tree_distance.png')
-    # evaluate trees
-    prec_list, reca_list, f1_list = np.array(prec_list).reshape((-1, 1)), \
-        np.array(reca_list).reshape(
-            (-1, 1)), np.array(f1_list).reshape((-1, 1))  # convert list to numpy array
-    logger.info('-' * 80)
-    np.set_printoptions(precision=4)
-    correct, total = corpus_stats_labeled(corpus_sys, corpus_ref)
-
-    print('-'*20 , 'model:{}----method:{}---layer nb:{}---head nb:{}'.format(
-        args.model_name_or_path, args.method ,args.layer_nb, args.head_nb)+'-'*20, file=res_log)
-    print('Mean Prec:', prec_list.mean(axis=0),
-          ', Mean Reca:', reca_list.mean(axis=0),
-          ', Mean F1:', f1_list.mean(axis=0))
-    print('Number of sentence: %i' % sample_count)
-    print(correct)
-    print(total)
-    print('ADJP:', correct['ADJP'], total['ADJP'])
-    print('NP:', correct['NP'], total['NP'])
-    print('PP:', correct['PP'], total['PP'])
-    print('INTJ:', correct['INTJ'], total['INTJ'])
-    print(corpus_average_depth(corpus_sys), file=res_log)
-
-    result = evalb(pred_tree_list, targ_tree_list)
-    print(result, file=res_log)
-    res_log.flush()  # write buffer to file
-    return f1_list.mean(axis=0)
 
 def train(args, model, tokenizer, checkpoint=None):
     if args.local_rank in [-1, 0]:
@@ -179,7 +77,7 @@ def train(args, model, tokenizer, checkpoint=None):
     if args.n_gpu > 1:
         model = torch.nn.DataParallel(model)
     global_step = checkpoint['step'] if checkpoint is not None else 0
-    tr_loss, logging_loss, tr_acc = 0.0, 0.0, 0.0
+    tr_loss, logging_loss, tr_acc, tr_f1 = 0.0, 0.0, 0.0, 0.0
     model.zero_grad()
     train_iterator = trange(int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0])
     set_seed(args)  # Added here for reproducibility (even between python 2 and 3)
@@ -194,9 +92,8 @@ def train(args, model, tokenizer, checkpoint=None):
                 iter_samples+=len(input_ids)
                 if args.few_shot>0 and iter_samples>args.few_shot: break # few shot training
                 inputs = input_ids.to(args.device)
-                loss, acc = model(inputs, attention_mask,bpe_ids, labels, args.method, args.loss_function)
+                loss, acc, f1 = model(inputs, attention_mask, bpe_ids, labels, args.method)
             else:
-                input_ids,attention_mask,_,_,_=batch
                 inputs = input_ids.to(args.device)
                 loss, acc = model(inputs, attention_mask)
             
@@ -205,6 +102,7 @@ def train(args, model, tokenizer, checkpoint=None):
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
                 acc = acc / args.gradient_accumulation_steps
+                f1 = f1 / args.gradient_accumulation_steps
 
             if args.fp16:
                 with amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -214,6 +112,7 @@ def train(args, model, tokenizer, checkpoint=None):
 
             tr_loss += loss.item()
             tr_acc += acc
+            tr_f1 += f1
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 if args.fp16:
                     torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
@@ -232,10 +131,12 @@ def train(args, model, tokenizer, checkpoint=None):
                             tb_writer.add_scalar('eval_{}'.format(key), value, global_step)
                     tb_writer.add_scalar('lr', scheduler.get_lr()[0], global_step)
                     tb_writer.add_scalar('loss', (tr_loss - logging_loss)/args.logging_steps, global_step)
-                    logger.info(f'step: {global_step} ,loss: {(tr_loss - logging_loss)/args.logging_steps}, acc: {tr_acc/args.logging_steps}')
+                    logger.info('step: {} ,loss: {}, acc: {}, f1: {}'.format(
+                        global_step, (tr_loss - logging_loss)/args.logging_steps, tr_acc/args.logging_steps, tr_f1/args.logging_steps
+                    ))
                     logging_loss = tr_loss
                     tr_acc=0.
-
+                    tr_f1=0.
                 if args.local_rank in [-1, 0] and args.save_steps > 0 and global_step % args.save_steps == 0:
                     checkpoint_prefix = 'checkpoint'
                     # Save model checkpoint
@@ -247,14 +148,14 @@ def train(args, model, tokenizer, checkpoint=None):
                                 'step': global_step, 
                                 'args': args}
                     if (not args.frozen_bert) or (not args.is_supervised): checkpoint['bert']=model.bert.state_dict()
+                    if hasattr(model, 'label_predictor'): checkpoint['label_predictor']=model.label_predictor.state_dict()
                     torch.save(checkpoint, output_path)
                     logger.info("Saving model checkpoint to %s", output_path)
 
-                    # _rotate_checkpoints(args, checkpoint_prefix)
+                if args.max_steps > 0 and global_step > args.max_steps:
+                    epoch_iterator.close()
+                    break
 
-                    if args.max_steps > 0 and global_step > args.max_steps:
-                        epoch_iterator.close()
-                        break
 
         if args.max_steps > 0 and global_step > args.max_steps:
             train_iterator.close()
@@ -268,7 +169,7 @@ def train(args, model, tokenizer, checkpoint=None):
 def eval(args, model, tokenizer,prefix=""):
     # Loop to handle MNLI double evaluation (matched, mis-matched)
     eval_output_dir = args.output_dir
-    eval_dataset = supervised_load_datasets(args, tokenizer)
+    eval_dataset = supervised_load_datasets(args, tokenizer, 'val')
 
     if not os.path.exists(eval_output_dir) and args.local_rank in [-1, 0]:
         os.makedirs(eval_output_dir)
@@ -285,30 +186,30 @@ def eval(args, model, tokenizer,prefix=""):
     logger.info("***** Running evaluation {} *****".format(prefix))
     logger.info("  Num examples = %d", len(eval_dataset))
     logger.info("  Batch size = %d", args.eval_batch_size)
-    avg_acc,eval_loss = 0,0
+    avg_acc,avg_f1,eval_loss = 0.,0.,0.
     nb_eval_steps = 0
     model.eval()
     for batch in tqdm(eval_dataloader, desc="Evaluating"):
-        if args.is_supervised:
-            input_ids,attention_mask,bpe_ids,labels=batch
-        else:
-            input_ids,attention_mask,bpe_ids,_,_=batch
+        input_ids,attention_mask,bpe_ids,labels,_,_=batch
         inputs = input_ids.to(args.device)
         with torch.no_grad():
             if args.is_supervised:
-                loss,acc = model(inputs, attention_mask,bpe_ids, labels, args.method, args.loss_function)
+                loss,acc,f1 = model(inputs, attention_mask,bpe_ids, labels, args.method)
             else:
                 loss, acc = model(inputs, attention_mask)
             eval_loss += loss.mean().item()
             avg_acc+=acc
+            avg_f1+=f1
         nb_eval_steps += 1
 
     eval_loss = eval_loss / nb_eval_steps
     avg_acc=avg_acc/nb_eval_steps
+    avg_f1=avg_f1/nb_eval_steps
 
     result = {
         "loss": eval_loss,
-        "acc": avg_acc
+        "acc": avg_acc,
+        'f1': avg_f1
     }
 
     output_eval_file = os.path.join(eval_output_dir, "eval_results.txt")
@@ -323,7 +224,7 @@ def eval(args, model, tokenizer,prefix=""):
 
 def test(args, model, tokenizer,prefix=''):
     # test parsing performance
-    test_dataset = supervised_load_datasets(args, tokenizer)
+    test_dataset = supervised_load_datasets(args, tokenizer, task='test')
 
     args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
     # Note that DistributedSampler samples randomly
@@ -339,9 +240,10 @@ def test(args, model, tokenizer,prefix=''):
     all_pred_trees=[]
     all_std_trees=[]
     for batch in tqdm(eval_dataloader, desc="Evaluate parsing"):
-        input_ids,attention_mask,bpe_ids,trees,nltk_trees=batch
+        input_ids,attention_mask,bpe_ids,_,trees,nltk_trees=batch
         inputs = input_ids.to(args.device)
         all_std_trees.extend(trees)
+        
         with torch.no_grad():
             sents = [[tokenizer.convert_ids_to_tokens(i.item()) for i in ids[1:len(torch.nonzero(masks))-1]]
                 for ids, masks in zip(inputs,attention_mask)] # detokenize
@@ -350,9 +252,13 @@ def test(args, model, tokenizer,prefix=''):
             if flat_tree(trees[0])!=sents[0]:
                 print('error tree')
                 continue
-            pred_trees, all_attens, all_keys, all_querys = model.parse(inputs, attention_mask,bpe_ids, sents, args.rm_bpe_from_a,
-                 'cky', args.method, args.use_bert_head)
+            pred_trees, all_attens, all_keys, all_querys = model.parse(
+                inputs, attention_mask,bpe_ids, sents, args.rm_bpe_from_a,args.decoding, args.method)
             all_pred_trees.extend(pred_trees)
+            # for i,(a,s) in enumerate(zip(all_attens, sents)):
+            #     if ' '.join(s).startswith('under an agreement signed'):
+            #         visual_attention([np.exp(a),],[s,],'attention-frozen')
+            #         pass
             # visual_hiddens(query, key, sents)
             # visual_hiddens(all_querys, all_keys, sents)
             # visual_attention(all_attens, sents)
@@ -378,13 +284,22 @@ def test(args, model, tokenizer,prefix=''):
 
     return eval_res
 
+def convert_to_nltk_tree(tree):
+    if isinstance(tree,str):
+        return tree
+    tree_node=Tree(tree[0],[])
+    for child in tree[1:]:
+        child_node=convert_to_nltk_tree(child)
+        tree_node.insert(len(tree_node),child_node)
+    return tree_node
+
 def flat_tree(tree):
     if isinstance(tree,str): 
         tree=tree.lower()
         return [tree,]
     s=[]
     for child in tree:
-        s.extend(flat_tree(child))
+        s.extend(flat_tree(child))                                                                                                                          
     return s
 
 def set_seed(args):
@@ -439,30 +354,30 @@ def main():
     if checkpoint is not None and checkpoint.get('args') is not None:
         args=checkpoint['args']
         args.task_name=task_name
-        if args.__dict__.get('is_supervised') is None: args.is_supervised=True
-        if args.__dict__.get('lang') is None: args.lang='en'
-        if args.__dict__.get('rm_bpe_from_a') is None: args.rm_bpe_from_a=False
-        if args.__dict__.get('use_bert_head') is None: args.use_bert_head=-1
+        if not hasattr(args, 'is_supervised'): args.is_supervised=True
+        if not hasattr(args, 'lang'): args.lang='en'
+        if not hasattr(args, 'rm_bpe_from_a'): args.rm_bpe_from_a=False
+        if not hasattr(args, 'use_bert_head'): args.use_bert_head=-1
+        if not hasattr(args, 'pred_label'): args.pred_label=False
     logger.info("arguments: %s", args)
     if args.is_supervised:
         if args.frozen_bert and task_name=='train':
             for param in bert_model.parameters():
                 param.requires_grad_(False)
 
-        model=BertHead(bert_model, config.hidden_size,args.head_count,
-                        args.layer_nb,args.dropout,args.rm_bpe_from_a)
-        if args.frozen_head and task_name=='train':
-            model.key_proj.weight.requires_grad_(False)
-            model.key_proj.bias.requires_grad_(False)
-            model.query_proj.weight.requires_grad_(False)
-            model.query_proj.bias.requires_grad_(False)
+        model=BertHead(bert_model, config.hidden_size,args.head_count,args.layer_nb,args.dropout,
+                    args.loss_function, args.rm_bpe_from_a,len(en_label2idx) if args.pred_label else 0)
         if checkpoint is not None:
-            if checkpoint.get('key') is not None:
-                model.key_proj.load_state_dict(checkpoint['key'])
-            if checkpoint.get('query') is not None:
-                model.query_proj.load_state_dict(checkpoint['query'])
-            if checkpoint.get('bert') is not None:
-                model.bert.load_state_dict(checkpoint['bert'])
+            if checkpoint.get('key') is not None and checkpoint.get('query') is not None:
+                if isinstance(args.layer_nb, int):
+                    model.key_proj[0].load_state_dict(checkpoint['key'])
+                    model.query_proj[0].load_state_dict(checkpoint['query'])
+                else:
+                    model.key_proj.load_state_dict(checkpoint['key'])
+                    model.query_proj.load_state_dict(checkpoint['query'])
+
+            if checkpoint.get('bert') is not None: model.bert.load_state_dict(checkpoint['bert'])
+            if checkpoint.get('label_predictor') is not None: model.label_predictor.load_state_dict(checkpoint['label_predictor'])
     else:
         model=bert_model
         # model=BertForAdj(bert_model, config.hidden_size, config.num_attention_heads,
@@ -473,9 +388,7 @@ def main():
     if task_name=='eval':
         train(args, model, tokenizer)
     elif task_name=='test':
-        # test(args, model, tokenizer)
-        if not args.is_supervised: unsupervised_parsing(args, model, tokenizer)
-        else: test(args, model, tokenizer)
+        test(args, model, tokenizer)
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -529,8 +442,7 @@ def parse_args():
     parser.add_argument('--server_port', type=str,
                         default='', help="For distant debugging.")
     parser.add_argument('--log_path', type=str,
-                        default='log/bert_parse_log', help="For distant debugging.")
-    parser.add_argument('--layer_nb', type=int, default='-1', help="layer number for parsing")
+                        default='', help="For distant debugging.")
     parser.add_argument('--head_nb', type=int, default='-1', help="head number for parsing")
     parser.add_argument('--wsj10', action='store_true', help="test on wsj10")
     parser.add_argument('--method', type=str, default='inner', choices=['inner','cross'] ,help="parsing method, corss/inner")
@@ -549,6 +461,9 @@ def parse_args():
     parser.add_argument('--lang', type=str, default='en', choices=['en','zh'], help='train/parse on ptb or ctb data')
     parser.add_argument('--use_bert_head', type=int, default=-1, help='use which bert head, default not use')
     parser.add_argument('--loss_function', type=str, default='mle', choices=['mle','hinge'] ,help='use hinge loss or mle loss(cross entropy)')
+    parser.add_argument('--pred_label', action='store_true', help='whther to predict label')
+    parser.add_argument('--layer_nb', nargs='+', help='use which layers')
+    parser.add_argument('--early_stop', type=int, default=-1, help='patience of early stop')
 
     args = parser.parse_args()
 
@@ -561,12 +476,10 @@ def create_logger(args):
                         level=logging.INFO if args.local_rank in [-1, 0] else logging.WARN)
     logger.warning("Process rank: %s, device: %s, n_gpu: %s, distributed training: %s, 16-bits training: %s",
                    args.local_rank, args.device, args.n_gpu, bool(args.local_rank != -1), args.fp16)
-    if args.log_path is not None:
+    if args.log_path is not None and args.log_path != '':
         file_handler = logging.FileHandler(filename=args.log_path, mode='a')
-
-    logger.addHandler(file_handler)
+        logger.addHandler(file_handler)
 
 
 if __name__ == "__main__":
     main()
-    res_log.close()

@@ -110,6 +110,8 @@ class PtbProcessor(DataProcessor):
                 # sen_tree=self._remove_puntc(sen_tree) # remove puntc
                 if set_type in ('test','wsj10','val'):
                     tree = tree2list(sen_tree)
+                    # sen_tree.chomsky_normal_form()
+                    # label=tree2list(sen_tree)
                     if len(tree)==0: continue
                     list_tree, nltk_tree=tree,sen_tree
                 if set_type in ('train','val'):
@@ -200,9 +202,13 @@ def load_datasets(args, tokenizer=None, task='train'):
 if __name__ == "__main__":
     processor=PtbProcessor('en')
     test=processor.get_test_examples()
-    print(label2idx)
+    btrees=[x.label for x in test]
+    trees=[x.list_tree for x in test]
+    print(btrees[0])
+    print(trees[0])
+    from utils.parse_utils import evalb
+    evalb(btrees, trees)
     # test=sorted(test, key=lambda item: len(item.text_a.split()))
-    pass
     # print(null_labels/all_labels)
     # train=processor.get_train_examples()
     # print(len(train))

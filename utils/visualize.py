@@ -73,18 +73,22 @@ def visualize_f1_of_heads(f1_scores, layer_nb, method):
     """ f1_scores: numpy array, [head,f1] """
     visual_vec(f1_scores, f'figures/f1/{method}_{layer_nb}.png', x_labels='head', y_labels='f1')
 
-def visual_attention(a, s):
+def visual_attention(a, s, fname):
     if len(a)<4:
         row,col=1,len(a)
     else:
         row,col=len(a)//4,4
     fig, axs = plt.subplots(row,col, figsize=(10*col, 10*row))
-    axs=axs.reshape(-1)
+    if isinstance(axs, np.ndarray):
+        axs=axs.reshape(-1)
+    else:
+        axs=[axs,]
     for i in range(row*col):
+        axs[i].xaxis.tick_top()
         seaborn.heatmap(a[i], 
                         xticklabels=s[i], square=True, yticklabels=s[i], vmin=0.0, vmax=1.0, 
                         cbar=False,ax=axs[i])
-    plt.savefig('attention.png')
+    plt.savefig(fname,dpi=500,bbox_inches='tight')
     plt.close()
 
 if __name__ == "__main__":
