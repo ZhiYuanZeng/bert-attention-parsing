@@ -3,7 +3,7 @@ from nltk.tree import Tree
 import re
 from random import shuffle
 from transformers import DataProcessor, InputExample, InputFeatures
-
+import json
 if __name__ == "__main__":
     import sys
     sys.path[0]+='/../'
@@ -11,19 +11,28 @@ if __name__ == "__main__":
 from utils.data_utils import (word_tags,
     load_reader_and_filedids,
     load_and_cache_examples,
-    PtbDataset
+    PtbDataset,
+    en_label2idx as label2idx
 )
 MAX_NUM=-1
 
+# label2idx={'empty':0}
 def get_splits(tree, start_idx ,split_list):
-    # assert len(tree)
+    global null_labels, all_labels
     if not isinstance(tree,Tree): 
         return 1
     if len(tree)==1:
         return get_splits(tree[0], start_idx, split_list)
     l=get_splits(tree[0],start_idx, split_list)
     r=get_splits(tree[1], start_idx+l, split_list)
-    split_list.append((start_idx, start_idx+l+r-1, start_idx+l-1,)) # 
+    if '|' in tree.label():
+        label='empty'
+    else:
+        label=re.split(r'[-=]',tree.label())[0]
+    # if label2idx.get(label) is None: label2idx[label]=0
+    # else: label2idx[label]+=1
+    split_list.append((label2idx[label], # if '|' in label, the node is n-nary(n>2) node
+                    (start_idx, start_idx+l+r-1, start_idx+l-1,),))
     return l+r
 
 class PtbInputExample(InputExample):
@@ -41,7 +50,7 @@ class PtbProcessor(DataProcessor):
         self.reader,self.train_file_ids,self.valid_file_ids, self.test_file_ids=load_reader_and_filedids(lang)
 
     def get_wsj10_examples(self):
-        return self._create_examples(self.test_file_ids, 'wsj10')
+        return self._create_examples(self.train_file_ids+self.valid_file_ids+self.test_file_ids, 'wsj10')
 
     def get_train_examples(self):
         """See base class."""
@@ -60,7 +69,7 @@ class PtbProcessor(DataProcessor):
         for w, tag in tree.pos():
             if tag in word_tags[self.lang]:
                 # w = w.lower()
-                w = re.sub('[0-9]+', 'N', w)
+                w = re.sub('[0-9]+', 'n', w)
                 words.append(w)
         return words
 
@@ -70,7 +79,7 @@ class PtbProcessor(DataProcessor):
             if isinstance(tree, Tree):
                 if tree.label() in word_tags[self.lang]:
                     w = tree.leaves()[0].lower()
-                    w = re.sub('[0-9]+', 'N', w)
+                    w = re.sub('[0-9]+', 'n', w)
                     return w
                 else:
                     root = []
@@ -98,6 +107,7 @@ class PtbProcessor(DataProcessor):
                 texta = ' '.join(words)
                 guid = "%s-%s" % (set_type, i)
                 list_tree,nltk_tree,label=None, None, None
+                # sen_tree=self._remove_puntc(sen_tree) # remove puntc
                 if set_type in ('test','wsj10','val'):
                     tree = tree2list(sen_tree)
                     if len(tree)==0: continue
@@ -118,6 +128,7 @@ class PtbProcessor(DataProcessor):
                     PtbInputExample(guid=guid, text_a=texta, label=label, 
                         list_tree=list_tree ,nltk_tree=nltk_tree)
                 )
+        json.dump(label2idx,open(f'{self.lang}-label2idx.json','w'))
         return examples
     
     def _remove_puntc(self,tree):
@@ -131,6 +142,17 @@ class PtbProcessor(DataProcessor):
                 new_t.insert(len(new_t),subtree)
         return new_t
 
+    def _remove_tag(self,tree):
+        if isinstance(tree, str):
+            return re.sub('[0-9]+', 'n', tree.lower())
+        if len(tree)==1:
+            return self._remove_tag(tree[0])
+        new_t=Tree(tree.label(),[])
+        for subtree in tree:
+            if isinstance(subtree,Tree):
+                subtree=self._remove_tag(subtree)
+                new_t.insert(len(new_t),subtree)
+        return new_t
 class PtbInputFeatures(InputFeatures):
     def __init__(self, input_ids, attention_mask, bpe_ids=None, label=None, 
                 list_tree=None, nltk_tree=None):
@@ -144,8 +166,7 @@ class PtbInputFeatures(InputFeatures):
 def select_list_by_indices(list_,indices):
     return [list_[i] for i in indices]
 
-def load_datasets(args, tokenizer=None):
-    task=args.task_name
+def load_datasets(args, tokenizer=None, task='train'):
     lang=args.lang
     processor=PtbProcessor(lang)
     features=load_and_cache_examples(args, processor, PtbInputFeatures, tokenizer, task, lang)
@@ -178,8 +199,11 @@ def load_datasets(args, tokenizer=None):
 
 if __name__ == "__main__":
     processor=PtbProcessor('en')
-    # val=processor.get_val_examples()
-    # test=processor.get_test_examples()
+    test=processor.get_test_examples()
+    print(label2idx)
+    # test=sorted(test, key=lambda item: len(item.text_a.split()))
+    pass
+    # print(null_labels/all_labels)
     # train=processor.get_train_examples()
     # print(len(train))
     # wsj10=processor.get_wsj10_examples()

@@ -3,7 +3,8 @@ import torch
 from typing import List
 
 class BertHead(nn.Module):
-    def __init__(self, bert_model, hidden_size, head_num, layer_nb, dropout_rate=0.1, rm_bpe_from_a=False):
+    def __init__(self, bert_model, hidden_size, head_num, layer_nb, dropout_rate=0.1, 
+            rm_bpe_from_a=False, pred_label=False):
         assert hidden_size%head_num==0
         proj_hidden_size=hidden_size//head_num
         super(BertHead,self).__init__()
@@ -14,9 +15,19 @@ class BertHead(nn.Module):
         self.init_head(head_num)
         self.dropout=nn.Dropout(dropout_rate)
         self.rm_bpe_from_a=rm_bpe_from_a
+        if pred_label:
+            self.label_predictor=nn.Sequential(
+                nn.Linear(2*hidden_size,hidden_size//2),
+                nn.LayerNorm(hidden_size//2),
+                nn.GELU(),
+                # nn.Dropout(dropout_rate),
+                nn.Linear(hidden_size//2,2),
+                nn.Sigmoid()
+            )
+        self.pred_label=pred_label
         # self.max_seq_len=max_seq_len
     
-    def forward(self, inputs , attention_mask, bpe_ids, labels, method):
+    def forward(self, inputs , attention_mask, bpe_ids, labels, method, loss_function):
         """ 
         labels: List[List[Tuple[int,int,int]]]
         """
@@ -33,7 +44,9 @@ class BertHead(nn.Module):
             attention=[self.remove_bpe_from_attention(b, a) for a,b in zip(attention,bpe_ids)]
         
         loss=torch.tensor(0.).to(inputs.device)
+        label_loss_scale=3
         preds=[]
+        f1_list=[]
         for bidx in range(len(hiddens)):
             seq_len=len(attention_mask[bidx].nonzero())-2-len(bpe_ids[bidx])
             if seq_len!=len(labels[bidx])+1:
@@ -56,30 +69,57 @@ class BertHead(nn.Module):
             a=torch.log(a+1e-6)
             span_list=labels[bidx]
             span_len=0
+            TP1,FP1,TN1,FN1=0,0,0,0
+            TP2,FP2,TN2,FN2=0,0,0,0
             for span in span_list:
+                is_null,span=span
                 l,r,split_pos=span
-                if (r-l)==1:
-                    continue
-                span_len+=1
-                logp=self.get_predictions(l,r,a,method)
-                assert len(logp)==logp.shape[-1]
-                assert not torch.isnan(logp).all()
-                preds.append((logp.argmax(dim=-1)==(split_pos-l)).item())
-                loss+=(-logp[split_pos-l])/span_len
-        
-        return loss/len(hiddens),sum(preds)/max(len(preds),1)
+                if self.pred_label:
+                    span_embed=torch.cat((hiddens[bidx][l],hiddens[bidx][r]),dim=-1).unsqueeze(0) # hi;hj
+                    probs=self.label_predictor(span_embed).squeeze()
+                    likelihood=probs[int(is_null)]
+                    loss+=-torch.log(likelihood) if is_null else -torch.log(likelihood)/label_loss_scale
+                    TP1+=(likelihood.item()>0.5 and (probs[1]-probs[0]).item()>0) # likelihood>0.5 means predicts correct
+                    FP1+=(likelihood.item()<=0.5 and (probs[1]-probs[0]).item()>0)
+                    TN1+=(likelihood.item()>0.5 and (probs[1]-probs[0]).item()<=0)
+                    FN1+=(likelihood.item()<=0.5 and (probs[1]-probs[0]).item()<=0)
+                    TP2+=(likelihood.item()>0.5 and (probs[1]-probs[0]).item()<=0) # likelihood>0.5 means predicts correct
+                    FP2+=(likelihood.item()<=0.5 and (probs[1]-probs[0]).item()<=0)
+                    TN2+=(likelihood.item()>0.5 and (probs[1]-probs[0]).item()>0)
+                    FN2+=(likelihood.item()<=0.5 and (probs[1]-probs[0]).item()>0)
+                if False:
+                    if (r-l)==1: continue
+                    span_len+=1
+                    scores=self.get_predictions(l,r,a,method)
+                    assert len(scores)==scores.shape[-1]
+                    if loss_function=='mle':
+                        logp=torch.log_softmax(scores, dim=-1)
+                        assert not torch.isnan(logp).all()
+                        preds.append((logp.argmax(dim=-1)==(split_pos-l)).item())
+                        loss+=(-logp[split_pos-l])#/span_len NOTE
+                    else: # hinge loss
+                        indices=[i for i in range(len(scores)) if i!=(split_pos-l)]
+                        s_hat=scores[indices].max()
+                        loss+=max(0,1+s_hat-scores[split_pos-l])/span_len
+                        preds.append((scores.argmax(dim=-1)==(split_pos-l)).item())
+            prec1=TP1/(TP1+FP1) if (TP1+FP1)!=0 else 0.
+            reca1=TP1/(TP1+FN1) if (TP1+FN1)!=0 else 0.
+            prec2=TP2/(TP2+FP2) if (TP2+FP2)!=0 else 0.
+            reca2=TP2/(TP2+FN2) if (TP2+FN2)!=0 else 0.
+            f1=2*prec1*reca1/(prec1+reca1) if (prec1+reca1)!=0. else 0.
+            f2=2*prec2*reca2/(prec2+reca2) if (prec2+reca2)!=0. else 0.
+            f1_list.append((f1+f2)/2) # micro f1
+        return loss/len(hiddens),sum(preds)/max(len(preds),1),sum(f1_list)/len(f1_list)
     
     def parse(self, inputs , attention_mask, bpe_ids, sents, 
-            rm_bpe_from_a=True, decoding='cky',method='inner',use_bert_head=False):
+            rm_bpe_from_a=True, decoding='cky',method='inner'):
         _,_,all_hiddens,all_attentions=self.bert(inputs, attention_mask)
         hiddens=all_hiddens[self.layer_nb] # (bsz,seq,h)
         query=self.query_proj(hiddens) # (bsz,seq,h//head)
         key=self.key_proj(hiddens) # (bsz,seq,h//head)
         all_attens,all_keys,all_querys=[],[],[]
         hidden_size=query.shape[-1]
-        if use_bert_head>0:
-            attention=all_attentions[self.layer_nb][:,use_bert_head]
-        elif self.rm_bpe_from_a:
+        if rm_bpe_from_a:
             attention=torch.matmul(query,key.transpose(-1,-2)).masked_fill_(~attention_mask.bool().unsqueeze(1), float('-inf'))
             attention=attention/(hidden_size**0.5)
             attention=torch.softmax(attention,dim=-1)
@@ -90,7 +130,7 @@ class BertHead(nn.Module):
             k=self.remove_bpe_from_hiddens(bpe_ids[bidx],k)
             q=self.remove_bpe_from_hiddens(bpe_ids[bidx],q)
             k,q=k[1:1+seq_len],q[1:1+seq_len] # remove cls, sep, pad
-            if self.rm_bpe_from_a or use_bert_head>0:
+            if self.rm_bpe_from_a:
                 a=attention[bidx]
                 a=self.remove_bpe_from_attention(bpe_ids[bidx],a)
                 a=a[1:1+seq_len,1:1+seq_len] # remove cls token
@@ -268,7 +308,6 @@ class BertHead(nn.Module):
             else:
                 prediction[i-l]=(attention[l:(i+1), (i+1):(r+1)].sum()+
                                 attention[(i+1):(r+1), l:(i+1)].sum())/(2*(r-i)*(i-l+1))
-        prediction=torch.log_softmax(prediction, dim=-1)
         return prediction
 
     def init_head(self, head_num):
