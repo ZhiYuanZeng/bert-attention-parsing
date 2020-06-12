@@ -1,25 +1,28 @@
 import sys
 sys.path[0] += '/../'
 
+import argparse
+import numpy as np
+import random
+import logging
+import os
+import re
+import torch
+from tqdm import tqdm
+from torch.utils.data import DataLoader
+from transformers import BertConfig, BertModel, BertTokenizer
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except:
+    from tensorboardX import SummaryWriter
+
 from utils.parse_utils import evalb, MRG, MRG_labeled, comp_tree
 from dataloader.supervised_data import load_datasets as supervised_load_datasets
 from utils.parse_comparison import corpus_stats_labeled, corpus_average_depth
 from utils.data_utils import collate_fn
 from utils.visualize import visual_attention
-import logging
-import argparse
-import numpy as np
-import random
-import torch
-from tqdm import tqdm
-from torch.utils.data import DataLoader
 from parser import parse_cyk
-from transformers import BertConfig, BertModel, BertTokenizer
 from model.split_score import split_score, remove_bpe_from_attention, remove_bpe_from_hiddens
-try:
-    from torch.utils.tensorboard import SummaryWriter
-except:
-    from tensorboardX import SummaryWriter
 
 logger = logging.getLogger(__name__)
 file_to_print=open('unsupervised_res.txt','a')
@@ -77,9 +80,9 @@ def unsupervised_parsing(args, model, tokenizer, prefix=""):
             _,_, hiddens, attentions = outputs  # (layer_nb,bsz,head,m,m)
             hiddens = hiddens[args.layer_nb]
             # attentions=attentions[args.layer_nb][:,args.head_nb]
-            random_layer,random_head=random.randint(0,11),random.randint(0,11)
-            attentions=attentions[random_layer][:,random_head]
-            # attentions=(attentions[9][:,3]+attentions[7][:,10])/2
+            # random_layer,random_head=random.randint(0,11),random.randint(0,11)
+            # attentions=attentions[random_layer][:,random_head]
+            attentions=(attentions[9][:,3]+attentions[7][:,10])/2
             # attentions2 = attentions[7][:,10]
             # scores=[(s1+s2)/2 for s1,s2 in zip(scores1,scores2)]
             pred_trees=[]
@@ -90,13 +93,22 @@ def unsupervised_parsing(args, model, tokenizer, prefix=""):
                 a=remove_bpe_from_attention(bpe_ids[i], a)
                 h=h[1:1+seq_len]
                 a=a[1:1+seq_len,1:1+seq_len]
-                scores = split_score(h, a, bpe_ids[i], args.relevance_type, args.norm)
+                scores = split_score(h, a, bpe_ids[i], args.relevance_type, args.norm, args.inner_only)
                 tree = parse_cyk(scores, s)
                 pred_trees.append(tree)
-                if ' '.join(strings[i]).startswith('under an agreement signed'):
-                    visual_attention([a.cpu().numpy(),],[strings[i],],'attention-random')
-                    pass
-
+                # visual attention
+                # gold_tree=str(nltk_trees[i])
+                # if 'ADJP' in gold_tree:
+                #     print('------------ADJP-----------')
+                #     m=re.findall(r'(ADJP[^\n]*)\n',str(gold_tree))
+                #     print(m)
+                # if 'ADVP' in gold_tree:
+                #     print('------------ADVP-----------')
+                #     m=re.findall(r'(ADJP[^\n]*)\n',str(gold_tree))
+                #     print(m)
+                # if 'ADJP' in gold_tree:
+                #     visual_attention([a.cpu().numpy(),],[strings[i],],'attention-unsupervised.png')
+                #     pass
 
             # evaluate
             for i,(pred_tree, tgt_tree, nltk_tree) in enumerate(zip(pred_trees, tgt_trees, nltk_trees)):
@@ -111,7 +123,7 @@ def unsupervised_parsing(args, model, tokenizer, prefix=""):
                 sample_count += 1
             pred_tree_list += pred_trees
             targ_tree_list += tgt_trees
-            # print(f'f1 score:{sum(f1_list)/len(f1_list)}')
+            print(f'f1 score:{sum(f1_list)/len(f1_list)}')
     logger.info('-' * 80)
     np.set_printoptions(precision=4)
     correct, total = corpus_stats_labeled(corpus_sys, corpus_ref)
@@ -131,7 +143,7 @@ def unsupervised_parsing(args, model, tokenizer, prefix=""):
 
     result = evalb(pred_tree_list, targ_tree_list)
     print(f'task:{args.task_name} model:{args.model_name_or_path}, layer nb:{args.layer_nb}, \
-head nb:{args.head_nb}, norm: {args.norm}, f1:{result["f1"]}',file=file_to_print,flush=True)
+head nb:{args.head_nb}, seed: {args.seed}, f1:{result["f1"]}',file=file_to_print,flush=True)
 
 def flat_tree(tree):
     if isinstance(tree,str): 
@@ -179,6 +191,11 @@ def main():
                                         config=config, 
                                         cache_dir=args.cache_dir if args.cache_dir else None)
     model=model.to(device)
+    if os.path.isdir(args.model_name_or_path):
+        args_path=os.path.join(args.model_name_or_path,'training_args.bin')
+        if os.path.exists(args_path):
+            train_args=torch.load(args_path)
+            args.seed=train_args
     unsupervised_parsing(args, model, tokenizer)
 
 def parse_args():
@@ -279,6 +296,7 @@ def parse_args():
     parser.add_argument('--dropout', type=float, default=0.1, help="dropout rate")
     parser.add_argument('--lang', type=str, default='en', choices=['en','zh'], help='train/parse on ptb or ctb data')
     parser.add_argument('--norm', action='store_true', help='whether to normalize the split scores') 
+    parser.add_argument('--inner_only', action='store_true', help='whether to only use inner relevance score') 
 
     args = parser.parse_args()
 

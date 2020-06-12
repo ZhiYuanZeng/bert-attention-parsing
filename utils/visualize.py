@@ -88,7 +88,7 @@ def visual_attention(a, s, fname):
         seaborn.heatmap(a[i], 
                         xticklabels=s[i], square=True, yticklabels=s[i], vmin=0.0, vmax=1.0, 
                         cbar=False,ax=axs[i])
-    plt.savefig(fname,dpi=500,bbox_inches='tight')
+    plt.savefig(fname,bbox_inches='tight')
     plt.close()
 
 if __name__ == "__main__":

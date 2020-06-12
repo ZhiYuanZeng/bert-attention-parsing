@@ -92,7 +92,7 @@ def train(args, model, tokenizer, checkpoint=None):
                 iter_samples+=len(input_ids)
                 if args.few_shot>0 and iter_samples>args.few_shot: break # few shot training
                 inputs = input_ids.to(args.device)
-                loss, acc, f1 = model(inputs, attention_mask, bpe_ids, labels, args.method)
+                loss, acc, f1 = model(inputs, attention_mask, bpe_ids, labels, inner_only=args.inner_only)
             else:
                 inputs = input_ids.to(args.device)
                 loss, acc = model(inputs, attention_mask)
@@ -173,7 +173,6 @@ def eval(args, model, tokenizer,prefix=""):
 
     if not os.path.exists(eval_output_dir) and args.local_rank in [-1, 0]:
         os.makedirs(eval_output_dir)
-
     args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
     eval_sampler = SequentialSampler(eval_dataset)
     eval_dataloader = DataLoader(eval_dataset, sampler=eval_sampler, batch_size=args.eval_batch_size, collate_fn=collate_fn)
@@ -194,7 +193,7 @@ def eval(args, model, tokenizer,prefix=""):
         inputs = input_ids.to(args.device)
         with torch.no_grad():
             if args.is_supervised:
-                loss,acc,f1 = model(inputs, attention_mask,bpe_ids, labels, args.method)
+                loss,acc,f1 = model(inputs, attention_mask,bpe_ids, labels, inner_only=args.inner_only)
             else:
                 loss, acc = model(inputs, attention_mask)
             eval_loss += loss.mean().item()
@@ -224,7 +223,8 @@ def eval(args, model, tokenizer,prefix=""):
 
 def test(args, model, tokenizer,prefix=''):
     # test parsing performance
-    test_dataset = supervised_load_datasets(args, tokenizer, task='test')
+    test_dataset = supervised_load_datasets(args, tokenizer, task=args.task_name)
+    args.per_gpu_eval_batch_size=64
 
     args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
     # Note that DistributedSampler samples randomly
@@ -253,12 +253,12 @@ def test(args, model, tokenizer,prefix=''):
                 print('error tree')
                 continue
             pred_trees, all_attens, all_keys, all_querys = model.parse(
-                inputs, attention_mask,bpe_ids, sents, args.rm_bpe_from_a,args.decoding, args.method)
+                inputs, attention_mask,bpe_ids, sents, args.rm_bpe_from_a,args.decoding, inner_only=args.inner_only)
             all_pred_trees.extend(pred_trees)
-            # for i,(a,s) in enumerate(zip(all_attens, sents)):
-            #     if ' '.join(s).startswith('under an agreement signed'):
-            #         visual_attention([np.exp(a),],[s,],'attention-frozen')
-            #         pass
+            for i,(a,s) in enumerate(zip(all_attens, sents)):
+                if ' '.join(s).startswith('under an agreement signed'):
+                    visual_attention([np.exp(a),],[s,],'attention-frozen.svg')
+                    pass
             # visual_hiddens(query, key, sents)
             # visual_hiddens(all_querys, all_keys, sents)
             # visual_attention(all_attens, sents)
@@ -352,13 +352,17 @@ def main():
                                             config=config, 
                                             cache_dir=args.cache_dir if args.cache_dir else None)
     if checkpoint is not None and checkpoint.get('args') is not None:
+        dropout,max_steps=args.dropout,args.max_steps
         args=checkpoint['args']
-        args.task_name=task_name
+        args.task_name,args.max_steps=task_name,max_steps
+        args.dropout=dropout
         if not hasattr(args, 'is_supervised'): args.is_supervised=True
         if not hasattr(args, 'lang'): args.lang='en'
         if not hasattr(args, 'rm_bpe_from_a'): args.rm_bpe_from_a=False
         if not hasattr(args, 'use_bert_head'): args.use_bert_head=-1
         if not hasattr(args, 'pred_label'): args.pred_label=False
+        if not hasattr(args, 'inner_only'): args.inner_only=False
+        print(args.layer_nb)
     logger.info("arguments: %s", args)
     if args.is_supervised:
         if args.frozen_bert and task_name=='train':
@@ -380,13 +384,11 @@ def main():
             if checkpoint.get('label_predictor') is not None: model.label_predictor.load_state_dict(checkpoint['label_predictor'])
     else:
         model=bert_model
-        # model=BertForAdj(bert_model, config.hidden_size, config.num_attention_heads,
-        #                 args.layer_nb, args.negative_sample, args.dropout,args.rm_bpe_from_a)
     model=model.to(device)
     if task_name=='train':
         train(args, model, tokenizer, checkpoint)
-    if task_name=='eval':
-        train(args, model, tokenizer)
+    if task_name=='val':
+        test(args, model, tokenizer)
     elif task_name=='test':
         test(args, model, tokenizer)
 
@@ -397,7 +399,7 @@ def parse_args():
     parser.add_argument("--data_dir", default=None, type=str,help="The input data dir. Should contain the .tsv files (or other data files) for the task.")
     parser.add_argument("--model_name_or_path", default=None, type=str,help="Path to pre-trained model or shortcut name selected in the list")
     parser.add_argument("--output_dir", default=None, type=str,help="The output directory where the model predictions and checkpoints will be written.")
-    parser.add_argument("--task_name", default=None, type=str, choices=['train','eval','test'],help="train or eval or parse")
+    parser.add_argument("--task_name", default=None, type=str, choices=['train','val','test'],help="train or eval or parse")
 
     # Other parameters
     parser.add_argument("--config_name", default="", type=str,help="Pretrained config name or path if not the same as model_name")
@@ -445,7 +447,7 @@ def parse_args():
                         default='', help="For distant debugging.")
     parser.add_argument('--head_nb', type=int, default='-1', help="head number for parsing")
     parser.add_argument('--wsj10', action='store_true', help="test on wsj10")
-    parser.add_argument('--method', type=str, default='inner', choices=['inner','cross'] ,help="parsing method, corss/inner")
+    parser.add_argument('--inner_only', action='store_true',help="whether to only compute inside score")
     parser.add_argument('--decoding', type=str, default='cky', choices=['cky','greedy'] ,help="decoding method, cky/greedy")
     parser.add_argument('--is_supervised', action='store_true', help=" supervised_train")
     parser.add_argument('--tensorboard_dir', type=str, default='runs', help="logdir of tensorboard")

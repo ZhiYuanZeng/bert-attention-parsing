@@ -43,7 +43,7 @@ class BertHead(nn.Module):
         # backward_hiddens=hiddens[:,hidden_size//2:]
         return torch.cat((hiddens[i],hiddens[j],hiddens[i]*hiddens[j],hiddens[i]-hiddens[j]),dim=-1).unsqueeze(0)
 
-    def _layer_forward_(self, hiddens , query_proj, key_proj, attention_mask, bpe_ids, labels, method):
+    def _layer_forward_(self, hiddens , query_proj, key_proj, attention_mask, bpe_ids, labels, inner_only):
         """ 
         labels: List[List[Tuple[int,int,int]]]
         """
@@ -93,39 +93,38 @@ class BertHead(nn.Module):
                     loss+=-torch.log(likelihood)
                     label_preds.append(probs.argmax(dim=-1).item())
                     label_tgts.append(int(label))
-                if True:
-                    if (r-l)==1: continue
-                    span_len+=1
-                    scores=self.get_predictions(l,r,a,method)
-                    assert len(scores)==scores.shape[-1]
-                    if self.loss_function=='mle':
-                        logp=torch.log_softmax(scores, dim=-1)
-                        assert not torch.isnan(logp).all()
-                        preds.append((logp.argmax(dim=-1)==(split_pos-l)).item())
-                        loss+=(-logp[split_pos-l])
-                    else: # hinge loss
-                        indices=[i for i in range(len(scores)) if i!=(split_pos-l)]
-                        s_hat=scores[indices].max()
-                        loss+=max(0,1+s_hat-scores[split_pos-l])
-                        preds.append((scores.argmax(dim=-1)==(split_pos-l)).item())
+                if (r-l)==1: continue
+                span_len+=1
+                scores=self.get_predictions(l,r,a,inner_only)
+                assert len(scores)==scores.shape[-1]
+                if self.loss_function=='mle':
+                    logp=torch.log_softmax(scores, dim=-1)
+                    assert not torch.isnan(logp).all()
+                    preds.append((logp.argmax(dim=-1)==(split_pos-l)).item())
+                    loss+=(-logp[split_pos-l])
+                else: # hinge loss
+                    indices=[i for i in range(len(scores)) if i!=(split_pos-l)]
+                    s_hat=scores[indices].max()
+                    loss+=max(0,1+s_hat-scores[split_pos-l])
+                    preds.append((scores.argmax(dim=-1)==(split_pos-l)).item())
         # f1=f1_score(label_tgts,label_preds,average='weighted')
         f1=sum([t==p for t,p in zip(label_tgts, label_preds)])/max(1,len(label_tgts))
         return loss/len(hiddens),sum(preds)/max(len(preds),1),f1
     
-    def forward(self, inputs , attention_mask, bpe_ids, labels, method):
+    def forward(self, inputs , attention_mask, bpe_ids, labels, inner_only):
         """ return loss, average acc,f1 of multiple layers """
         _,_,all_hiddens,_=self.bert(inputs, attention_mask)
         loss, acc, f1=0.,0.,0.
         for i,layer in enumerate(self.layer_nb):
             l,a,f=self._layer_forward_(all_hiddens[layer] , self.query_proj[i], self.key_proj[i], attention_mask,
-                                    bpe_ids, labels, method)
+                                    bpe_ids, labels, inner_only)
             loss+=l
             acc+=a
             f1+=f
         return loss, acc/len(self.layer_nb), f1/len(self.layer_nb)
 
     def parse(self, inputs , attention_mask, bpe_ids, sents, 
-            rm_bpe_from_a=True, decoding='cky',method='inner'):
+            rm_bpe_from_a=True, decoding='cky',inner_only=False):
         _,_,all_hiddens,all_attentions=self.bert(inputs, attention_mask)
         all_attens,all_keys,all_querys=[],[],[]
         trees=[]
@@ -160,22 +159,22 @@ class BertHead(nn.Module):
 
             if decoding=='cky': 
                 tree=self.cky_pase(attens_of_layers, all_hiddens[self.layer_nb[0]][bidx] ,
-                                sents[bidx], method,norm=(self.loss_function=='mle'))
-            else: tree=self.greedy_parse(a, list(range(seq_len)), method)
+                                sents[bidx], inner_only=inner_only,norm=(self.loss_function=='mle'))
+            else: tree=self.greedy_parse(a, list(range(seq_len)), inner_only=inner_only)
             if self.pred_label>0: tree=tree[1]
             all_attens.extend(attens_of_layers)
             attens_of_layers.clear()
             trees.append(tree)
         return trees, all_attens, all_keys, all_querys
     
-    def greedy_parse(self,attention, sent, method):
+    def greedy_parse(self,attention, sent, inner_only=False):
         def parse(l,r):
             nonlocal attention, sent
             if (l+1)==r:
                 return [sent[l],sent[r]]
             if l==r:
                 return sent[l]
-            logp=self.get_predictions(l,r,attention, method)
+            logp=self.get_predictions(l,r,attention, inner_only)
             split_idx=torch.argmax(logp, dim=-1)
             ltree=parse(l,split_idx+l)
             rtree=parse(split_idx+1+l, r)
@@ -184,7 +183,7 @@ class BertHead(nn.Module):
         tree=parse(0, len(attention)-1)
         return tree
 
-    def cky_pase(self,attens_of_layers, hiddens, sent, method='inner', norm=True):
+    def cky_pase(self,attens_of_layers, hiddens, sent, inner_only=False, norm=True):
         """ 
         emsemble tree distribution of different layer
         param:
@@ -229,36 +228,29 @@ class BertHead(nn.Module):
             m = a.shape[-1]
             a_T = a.transpose(-1, -2)
             sum_of_attention = torch.zeros(m, m)
-            if method=='inner':
-                for i in range(m):
-                    for j in range(i,m):                                                                                                                                                                                
-                        if i <= j:
-                            if i>0:
-                                left = a[i:(j+1), 0:i].sum()+a_T[i:(j+1), 0:i].sum()
-                            else:
-                                left = 0
+            for i in range(m):
+                for j in range(i,m):                                                                                                                                                                                
+                    if i <= j:
+                        if i>0:
+                            left = a[i:(j+1), 0:i].sum()+a_T[i:(j+1), 0:i].sum()
+                        else:
+                            left = 0
 
-                            if j+1 < m:
-                                right = (a[i:(j+1), (j+1):m].sum()+a_T[i:(j+1), (j+1):m].sum())
-                            else:
-                                right = 0
-                            
-                            scale1 = (j-i+1)**2
-                            scale2 = 2*(m-(j-i+1))*(j-i+1) if m != (j-i+1) else 1
-                            sum_of_attention[i, j] = a[i:(j+1), i:(j+1)].sum()/scale1-(left+right)/scale2
-            else:
-                for i in range(m):
-                    for j in range(i, m):
-                        sum_of_attention[i,j] = a[i:(j+1), i:(j+1)].sum()
-            # print(sum_of_attention)
+                        if j+1 < m:
+                            right = (a[i:(j+1), (j+1):m].sum()+a_T[i:(j+1), (j+1):m].sum())
+                        else:
+                            right = 0
+                        
+                        scale1 = (j-i+1)**2
+                        scale2 = 2*(m-(j-i+1))*(j-i+1) if m != (j-i+1) else 1
+                        sum_of_attention[i, j] = a[i:(j+1), i:(j+1)].sum()/scale1
+                        if not inner_only:
+                            sum_of_attention[i,j]=sum_of_attention[i,j]-(left+right)/scale2
             for i in range(m):
                 for j in range(i+1, m):
                     split_score_of_span=torch.zeros(j-i)
                     for k in range(i, j):
-                        if method=='inner':
-                            split_score_of_span[k-i]=sum_of_attention[i,k]+sum_of_attention[k+1,j]
-                        else:
-                            split_score_of_span[k-i]=(sum_of_attention[i, j]-sum_of_attention[i, k]-sum_of_attention[k+1, j]) / (2*(j-k)*(k-i+1))
+                        split_score_of_span[k-i]=sum_of_attention[i,k]+sum_of_attention[k+1,j]
                     if norm:
                         split_score_of_span=torch.softmax(split_score_of_span,dim=-1)
                     split_score[i, j, i:j]+=split_score_of_span
@@ -301,11 +293,14 @@ class BertHead(nn.Module):
         non_bpe_ids=[]
         no_bpe_hiddens=hiddens.clone()
         if isinstance(bpe_ids,tuple): bpe_ids=bpe_ids[0]
+        cnt=1
         for i in reversed(range(seq_len)):
             if i not in bpe_ids:
                 non_bpe_ids.append(i)
+                cnt=1
             else:
-                no_bpe_hiddens[i-1]=(no_bpe_hiddens[i]+no_bpe_hiddens[i-1])/2
+                cnt+=1
+                no_bpe_hiddens[i-1]=no_bpe_hiddens[i]/cnt+no_bpe_hiddens[i-1]*(cnt-1)/cnt
         non_bpe_ids.reverse()
         no_bpe_hiddens=torch.index_select(no_bpe_hiddens,dim=0,index=torch.tensor(non_bpe_ids).to(device))
         return no_bpe_hiddens
@@ -321,12 +316,14 @@ class BertHead(nn.Module):
         device=attention.device
         no_bpe_attention=attention.clone()
         non_bpe_ids=[]
+        cnt=1
         if isinstance(bpe_ids,tuple):  bpe_ids=bpe_ids[0]
         for i in reversed(range(seq_len)):
             if i not in bpe_ids:
+                cnt=1
                 non_bpe_ids.append(i)
             else:
-                no_bpe_attention[i-1]=(no_bpe_attention[i]+no_bpe_attention[i-1])/2
+                no_bpe_attention[i-1]=no_bpe_attention[i]/cnt+no_bpe_attention[i-1]*(cnt-1)/cnt
                 no_bpe_attention[:,i-1]=(no_bpe_attention[:,i]+no_bpe_attention[:,i-1])
         non_bpe_ids.reverse()
         assert len(non_bpe_ids)==(seq_len-len(bpe_ids))
@@ -334,7 +331,7 @@ class BertHead(nn.Module):
         no_bpe_attention=torch.index_select(no_bpe_attention,dim=1,index=torch.tensor(non_bpe_ids).to(device))
         return no_bpe_attention
 
-    def get_predictions(self, l, r, attention, method='inner'):
+    def get_predictions(self, l, r, attention, inner_only=False):
         def get_span_scores(i,j,a,seq_len):
             a_T=a.t()
             m=seq_len
@@ -350,20 +347,18 @@ class BertHead(nn.Module):
             
             scale1 = (j-i+1)**2
             scale2 = 2*(m-(j-i+1))*(j-i+1) if m != (j-i+1) else 1
-            res=a[i:(j+1), i:(j+1)].sum(dim=(-1, -2))/scale1-(left+right)/scale2
+            res=a[i:(j+1), i:(j+1)].sum(dim=(-1, -2))/scale1
+            if not inner_only:
+                res=res-(left+right)/scale2
             assert not (res==float('inf')).any()
             return res
         
         seq_len=len(attention[0])
         prediction=torch.empty(r-l).to(attention.device)
         for i in range(l,r):
-            if method=='inner':
-                left_score=get_span_scores(l,i,attention,seq_len)
-                right_score=get_span_scores(i+1,r,attention,seq_len)
-                prediction[i-l]=left_score+right_score
-            else:
-                prediction[i-l]=(attention[l:(i+1), (i+1):(r+1)].sum()+
-                                attention[(i+1):(r+1), l:(i+1)].sum())/(2*(r-i)*(i-l+1))
+            left_score=get_span_scores(l,i,attention,seq_len)
+            right_score=get_span_scores(i+1,r,attention,seq_len)
+            prediction[i-l]=left_score+right_score
         return prediction
 
     def init_head(self, head_num):
@@ -374,6 +369,7 @@ class BertHead(nn.Module):
             else:
                 return weight.view(head_num, hidden_size//head_num).mean(dim=0)
         for i,layer in enumerate(self.layer_nb):
+            if layer>=11: layer=10 # layer11 is the last layer
             key_w=_avg_on_head(self.state_dict()[f'bert.encoder.layer.{layer+1}.attention.self.key.weight'])
             key_b=_avg_on_head(self.state_dict()[f'bert.encoder.layer.{layer+1}.attention.self.key.bias'])
             query_w=_avg_on_head(self.state_dict()[f'bert.encoder.layer.{layer+1}.attention.self.query.weight'])

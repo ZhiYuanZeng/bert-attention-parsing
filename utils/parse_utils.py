@@ -41,8 +41,8 @@ def evalb(pred_tree_list, targ_tree_list):
         # if isinstance(pred_tree, str) or isinstance(targ_tree, str): continue
         # assert isinstance(pred_tree, nltk.tree.Tree)
         # assert isinstance(targ_tree, nltk.tree.Tree)
-        # assert len(pred_tree.leaves())==len(targ_tree.leaves())
-        # assert len(pred_tree.leaves())==len(targ_tree.leaves())
+        assert len(pred_tree.leaves())==len(targ_tree.leaves())
+        assert len(pred_tree.leaves())==len(targ_tree.leaves())
         # assert all(
         #     w1.lower()==w2.lower()
         #     for w1,w2 in zip(pred_tree.leaves(), targ_tree.leaves())

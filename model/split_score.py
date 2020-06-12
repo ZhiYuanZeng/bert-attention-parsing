@@ -33,7 +33,7 @@ def relevance_score(hiddens,attens,rev_score_type):
         distance=-torch.log(torch.softmax(distance**0.5,dim=-1))
         return distance
 
-def split_score(hiddens, attens, bpe_ids, rev_score_type='attention' ,norm=False):
+def split_score(hiddens, attens, bpe_ids, rev_score_type='attention' ,norm=False, inner_only=False):
     """ 
     compute split scores, the hiddens and attens should not contain bpe\\
     @params
@@ -59,7 +59,9 @@ def split_score(hiddens, attens, bpe_ids, rev_score_type='attention' ,norm=False
                     right = 0
                 scale1 = (j-i+1)**2
                 scale2 = 2*(m-(j-i+1))*(j-i+1) if m != (j-i+1) else 1
-                sum_of_attention[i, j] = rev_scores[i:(j+1), i:(j+1)].sum(dim=(-1, -2))/scale1-(left+right)/scale2
+                sum_of_attention[i, j] = rev_scores[i:(j+1), i:(j+1)].sum(dim=(-1, -2))/scale1  
+                if not inner_only:
+                    sum_of_attention[i, j] = sum_of_attention[i,j]-(left+right)/scale2
     for i in range(m):
         for j in range(i+1, m):
             for k in range(i, j):
@@ -80,13 +82,16 @@ def remove_bpe_from_hiddens(bpe_ids, hiddens):
     seq_len=hiddens.shape[0]
     device=hiddens.device
     non_bpe_ids=[]
+    cnt=1
     no_bpe_hiddens=hiddens.clone()
     if isinstance(bpe_ids,tuple): bpe_ids=bpe_ids[0]
     for i in reversed(range(seq_len)):
         if i not in bpe_ids:
             non_bpe_ids.append(i)
+            cnt=1
         else:
-            no_bpe_hiddens[i-1]=(no_bpe_hiddens[i]+no_bpe_hiddens[i-1])/2
+            cnt+=1
+            no_bpe_hiddens[i-1]=no_bpe_hiddens[i]/cnt+no_bpe_hiddens[i-1]*(cnt-1)/cnt
     non_bpe_ids.reverse()
     no_bpe_hiddens=torch.index_select(no_bpe_hiddens,dim=0,index=torch.tensor(non_bpe_ids).to(device))
     return no_bpe_hiddens
@@ -103,12 +108,15 @@ def remove_bpe_from_attention(bpe_ids, attention):
     device=attention.device
     no_bpe_attention=attention.clone()
     non_bpe_ids=[]
+    cnt=1
     if isinstance(bpe_ids,tuple):  bpe_ids=bpe_ids[0]
     for i in reversed(range(seq_len)):
         if i not in bpe_ids:
             non_bpe_ids.append(i)
+            cnt=1
         else:
-            no_bpe_attention[i-1]=(no_bpe_attention[i]+no_bpe_attention[i-1])/2
+            cnt+=1
+            no_bpe_attention[i-1]=no_bpe_attention[i]/cnt+no_bpe_attention[i-1]*(cnt-1)/cnt
             no_bpe_attention[:,i-1]=(no_bpe_attention[:,i]+no_bpe_attention[:,i-1])
     non_bpe_ids.reverse()
     assert len(non_bpe_ids)==(seq_len-len(bpe_ids))
