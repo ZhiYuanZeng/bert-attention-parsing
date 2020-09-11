@@ -2,7 +2,10 @@ from torch.utils.data import Dataset
 import torch
 from collections import Sequence, defaultdict
 import os
+import random
 import logging
+import unicodedata
+from nltk.corpus import BracketParseCorpusReader
 logger = logging.getLogger(__name__)
 
 
@@ -13,43 +16,107 @@ word_tags = {
     'zh':set(['AD','AS','BA','CC','CD','CS''DEC','DEG','DER','DEV',
             'DT','ETC','FW','IJ','JJ','LB','LC','M','MSP','NN','NR','NT',
             'OD','ON','P','PN','SB','SP','VA','VC','VE','VV'
-    ])
+    ]),
+    'jp':set(['QUOT','-LRB-','-RRB-','ADJI','ADJN','ADV','AX','AXD','CL','CONJ','D','FW','INTJ',
+            'MD','N','NEG','NPR','NUM','P','PASS','PNL','PRO','Q','QN','SYM','VB','VB0','VB2','WADV','WD','WNUM','WPRO',]),
+    'fr':set(['N','A','Adv','P','D','CL','ET','C','I','PRO','V']),
+    'il':set(['N','NS','NPR','NPRS','ADJP','ADJR','ADJS','PRO','D','NUM','VB','BE','DO','HV','MD','RD','VAN','BAN',
+        'DAN','HAN','VBN','BEN','DON','HVN','RDN','P','ADV','ADVR','ADVS']),
 }
-# en_label2idx={"empty": 0, "NP": 1, "ADJP": 2, "PP": 3, "VP": 4, "S": 5, "UCP": 6, "RRC": 7, "QP": 8,
-#  "ADVP": 9, "SBAR": 10, "SINV": 11, "NAC": 12, "FRAG": 13, "CONJP": 14, "PRN": 15, "WHPP": 16, "NX": 17, 
-#  "WHNP": 18, "SBARQ": 19, "SQ": 20, "INTJ": 21, "X": 22, "WHADVP": 23, "WHADJP": 24, "PRT": 25}
 en_label2idx=defaultdict(int, {"empty": 1})
 en_idx2label=defaultdict(str, {1: "empty"})
 
-ctb_dir='/home/zyzeng/nltk_data/corpora/ctb/cleaned/'
+treebank_dir='/data/zyzeng/datasets/treebank'
+train_data_size,val_data_size,test_data_size=80,1000,2000
 
-def load_reader_and_filedids(lang):
-    assert lang in ('en','zh')
+def load_reader_and_filedids(lang,data_type):
+    assert data_type in ('train','val','test')
+    def filter_trees(tree, data_type):
+        def _is_control(char):
+            """Checks whether `chars` is a control character."""
+            # These are technically control characters but we count them as whitespace
+            # characters.
+            if char == "\t" or char == "\n" or char == "\r":
+                return False
+            cat = unicodedata.category(char)
+            if cat.startswith("C"):
+                return True
+            return False
+        
+        sent=tree.leaves()
+        if data_type=='wsj' and len(sent)>10: return False
+        if data_type!='wsj' and len(sent)>128: return False
+        try:
+            for c in ' '.join(sent):
+                cp=ord(c)
+                if cp == 0 or cp == 0xfffd or _is_control(c):
+                    return False
+            return True
+        except:
+            return False
+
+    def filt_id(fileids,lang):
+        assert lang in ('en','fr','zh')
+        train_file_ids,valid_file_ids,test_file_ids=[],[],[]
+        for id in fileids:
+            prefix=id.split('.')[0]
+            if lang=='en':
+                if 'WSJ/22/WSJ_2200' <= prefix <= 'WSJ/22/WSJ_2299':
+                    valid_file_ids.append(id)
+                elif 'WSJ/23/WSJ_2300' <= prefix <= 'WSJ/23/WSJ_2399':
+                    test_file_ids.append(id)
+                else:
+                    train_file_ids.append(id)        
+            elif lang=='zh':
+                if '0886' <= prefix <= '0931' or '1148' <= prefix <= '1151':
+                    valid_file_ids.append(id)
+                elif '0816' <= prefix <= '0885' or '1137' <= prefix <='1147':
+                    test_file_ids.append(id)
+                else:
+                    train_file_ids.append(id)        
+            else:
+                if prefix in ('flmf3_12500_12999co','flmf7ab2ep','flmf7ad1co','flmf7ae1ep'):
+                    valid_file_ids.append(id) 
+                elif prefix in ('flmf3_12000_12499ep','flmf7aa1ep','flmf7aa2ep','flmf7ab1co'):
+                    test_file_ids.append(id)
+                else:
+                    train_file_ids.append(id)
+        return train_file_ids,valid_file_ids,test_file_ids
+
+    assert lang in ('en','zh','fr','il','jp','sp','ca','sw','de')
+    lang_dir=treebank_dir+'/'+lang
+    reader=BracketParseCorpusReader(lang_dir, '.*')
+    fileids=reader.fileids()
+    if data_type=='wsj10':
+        return [t for t in reader.parsed_sents(fileids) if filter_trees(t,data_type)]
     train_file_ids = []
     valid_file_ids = []
     test_file_ids = []
-    if lang=='en':
-        from nltk.corpus import ptb
-        reader=ptb
-        for id in reader.fileids():
-            if 'WSJ/00/WSJ_0000.MRG' <= id <= 'WSJ/24/WSJ_2499.MRG':
-                train_file_ids.append(id)
-            if 'WSJ/22/WSJ_2200.MRG' <= id <= 'WSJ/22/WSJ_2299.MRG':
-                valid_file_ids.append(id)
-            if 'WSJ/23/WSJ_2300.MRG' <= id <= 'WSJ/23/WSJ_2399.MRG':
-                test_file_ids.append(id)
-        return ptb, train_file_ids, valid_file_ids, test_file_ids
+    if lang in ('en','zh','fr'):
+        train_file_ids,valid_file_ids,test_file_ids=filt_id(fileids,lang)
+        train_trees=reader.parsed_sents(train_file_ids)
+        val_trees=reader.parsed_sents(valid_file_ids)
+        test_trees=reader.parsed_sents(test_file_ids)
     else:
-        from nltk.corpus import BracketParseCorpusReader
-        reader=BracketParseCorpusReader(ctb_dir, '.*')
-        for id in reader.fileids():
-            if id.startswith('train'):
-                train_file_ids.append(id)
-            elif id.startswith('val'):
-                valid_file_ids.append(id)
-            elif id.startswith('test'):
-                test_file_ids.append(id)
-    return reader, train_file_ids, valid_file_ids, test_file_ids
+        for fid in fileids:
+            if 'train' in fid:
+                train_trees=reader.parsed_sents(fid)
+            elif 'val' in fid:
+                val_trees=reader.parsed_sents(fid)
+            elif 'test' in fid:
+                test_trees=reader.parsed_sents(fid)
+    if data_type=='train':
+        train_trees=[t for t in train_trees if filter_trees(t,data_type)]
+        print(f'train:{len(train_trees)}')
+        return train_trees
+    elif data_type=='val':
+        val_trees=[t for t in val_trees if filter_trees(t,data_type)]
+        print(f'val:{len(val_trees)}')
+        return val_trees
+    else:
+        test_trees=[t for t in test_trees if filter_trees(t,data_type)]
+        print(f'test:{len(test_trees)}')
+        return test_trees     
 
 class PtbDataset(Dataset):
     def __init__(self, *objs):
@@ -127,6 +194,9 @@ def convert_examples_to_features(args, feature_class, examples, tokenizer,
             max_length=max_length,
         )
         input_ids, token_type_ids = inputs["input_ids"], inputs["token_type_ids"]
+        # if len(tokenizer.decode(input_ids).split()) != len(example.text_a.split())+2: 
+        #     print('error at data_utils: tokenizing error')
+        #     continue
         bpe_ids = get_bpe_ids(tokenizer.ids_to_tokens, input_ids)
         # The mask has 1 for real tokens and 0 for padding tokens. Only real
         # tokens are attended to.
@@ -202,14 +272,3 @@ def load_and_cache_examples(args, processor ,feature_class, tokenizer=None, task
                         cached_features_file)
             torch.save(features, cached_features_file)
     return features
-
-def load_glove(glove_path:str)->dict:
-    glove_vectors=dict()
-    with open(glove_path,'r') as f:
-        line=f.readline()
-        list_=line.split()
-        assert len(list)==301
-        token=list_[0]
-        vector=torch.tensor(list_[1:])
-        glove_vectors[token]=vector
-    return glove_vectors

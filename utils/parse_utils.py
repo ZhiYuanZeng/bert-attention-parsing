@@ -9,6 +9,15 @@ word_tags = set(['CC', 'CD', 'DT', 'EX', 'FW', 'IN', 'JJ', 'JJR', 'JJS', 'LS', '
              'POS', 'PRP', 'PRP$', 'RB', 'RBR', 'RBS', 'RP', 'SYM', 'TO', 'UH', 'VB', 'VBD', 'VBG', 'VBN', 'VBP', 'VBZ',
              'WDT', 'WP', 'WP$', 'WRB'])
 
+def flat_tree(tree):
+    if isinstance(tree,str): 
+        tree=tree.lower()
+        return [tree,]
+    s=[]
+    for child in tree:
+        s.extend(flat_tree(child))
+    return s
+
 def evalb(pred_tree_list, targ_tree_list):
     import os
     import subprocess
@@ -22,8 +31,9 @@ def evalb(pred_tree_list, targ_tree_list):
     print("Temp: {}, {}".format(temp_file_path, temp_targ_path))
     temp_tree_file = open(temp_file_path, "w")
     temp_targ_file = open(temp_targ_path, "w")
-
-    for pred_tree, targ_tree in zip(pred_tree_list, targ_tree_list):
+    error_samples=[]
+    for i in range(len(pred_tree_list)):
+        pred_tree, targ_tree =pred_tree_list[i], targ_tree_list[i]
         def process_str_tree(str_tree):
             return re.sub('[ |\n]+', ' ', str_tree)
 
@@ -34,19 +44,16 @@ def evalb(pred_tree_list, targ_tree_list):
                     tree.append(list2tree(child))
                 return nltk.Tree('<unk>', tree)
             elif isinstance(node, str):
-                return nltk.Tree('<word>', [node])
+                return nltk.Tree('<word>', ['word'])
         if not isinstance(pred_tree, nltk.tree.Tree):
             pred_tree=list2tree(pred_tree)
             targ_tree=list2tree(targ_tree)
-        # if isinstance(pred_tree, str) or isinstance(targ_tree, str): continue
-        # assert isinstance(pred_tree, nltk.tree.Tree)
-        # assert isinstance(targ_tree, nltk.tree.Tree)
-        assert len(pred_tree.leaves())==len(targ_tree.leaves())
-        assert len(pred_tree.leaves())==len(targ_tree.leaves())
-        # assert all(
-        #     w1.lower()==w2.lower()
-        #     for w1,w2 in zip(pred_tree.leaves(), targ_tree.leaves())
-        # )
+        pred_leaves=pred_tree.leaves()
+        targ_leaves=targ_tree.leaves()
+        if len(pred_leaves)!=len(targ_leaves):
+            error_samples.append((pred_leaves, targ_leaves))
+            continue
+        if str(targ_tree).count('(')==1: continue
         temp_tree_file.write(process_str_tree(str(pred_tree).lower()) + '\n')
         temp_targ_file.write(process_str_tree(str(targ_tree).lower()) + '\n')
 
@@ -64,33 +71,33 @@ def evalb(pred_tree_list, targ_tree_list):
         temp_eval_path)
 
     subprocess.run(command, shell=True)
-
+    evalb_fscore, evalb_fscore_10=0,0
     with open(temp_eval_path) as infile:
         for line in infile:
-            match = re.match(r"Bracketing Recall\s+=\s+(\d+\.\d+)", line)
-            if match:
-                evalb_recall = float(match.group(1))
-            match = re.match(r"Bracketing Precision\s+=\s+(\d+\.\d+)", line)
-            if match:
-                evalb_precision = float(match.group(1))
+            # match = re.match(r"Bracketing Recall\s+=\s+(\d+\.\d+)", line)
+            # if match:
+            #     evalb_recall = float(match.group(1))
+            # match = re.match(r"Bracketing Precision\s+=\s+(\d+\.\d+)", line)
+            # if match:
+            #     evalb_precision = float(match.group(1))
             match = re.match(r"Bracketing FMeasure\s+=\s+(\d+\.\d+)", line)
-            if match:
+            if match and evalb_fscore==0:
                 evalb_fscore = float(match.group(1))
-                break
+            elif match and evalb_fscore!=0 and evalb_fscore_10==0:
+                evalb_fscore_10 = float(match.group(1))
     success = (
-        not math.isnan(evalb_fscore) or
-        evalb_recall == 0.0 or
-        evalb_precision == 0.0)
+        not math.isnan(evalb_fscore)
+    )
 
     if success:
         temp_path.cleanup()
-
+    for i,sample in enumerate(error_samples):
+        print(f'sample: {i}: (original sent:{sample[1]}) (pred sent:{sample[0]})') 
     print('-' * 80)
-    print('Evalb Prec:', evalb_precision,
-          ', Evalb Reca:', evalb_recall,
-          ', Evalb F1:', evalb_fscore)
+    print('Evalb F1:', evalb_fscore, 
+        ', Evalb F1 Len<=10:', evalb_fscore_10)
 
-    return {'prec':evalb_precision,'rec':evalb_recall,"f1":evalb_fscore}
+    return {'f1_10':evalb_fscore_10,"f1":evalb_fscore}
 
 def MRG(tr):
     if isinstance(tr, str):

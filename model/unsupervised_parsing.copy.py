@@ -80,26 +80,31 @@ def unsupervised_parsing(args, model, tokenizer, prefix=""):
             outputs = model(**inputs)
             _,_, hiddens, attentions = outputs  # (layer_nb,bsz,head,m,m)
             hiddens = hiddens[args.layer_nb]
-            attentions=attentions[args.layer_nb][:,args.head_nb]
+            # attentions=attentions[args.layer_nb][:,args.head_nb]
             # random_layer,random_head=random.randint(0,11),random.randint(0,11)
             # attentions=attentions[random_layer][:,random_head]
-            # attentions=(attentions[9][:,3]+attentions[7][:,10])/2
+            # attentions=(attentions[5][:,10]+attentions[10][:,6]+attentions[11][:,0])/3
             # attentions2 = attentions[7][:,10]
             # scores=[(s1+s2)/2 for s1,s2 in zip(scores1,scores2)]
 
             pred_trees=[]
-            for j in range(len(hiddens)):
-                h,a,s=hiddens[j],attentions[j],strings[j]
-                if args.remove_bpe:
-                    h=remove_bpe_from_hiddens(bpe_ids[j], h)
-                    a=remove_bpe_from_attention(bpe_ids[j], a)
-                    seq_len=len(attention_mask[j].nonzero())-2-len(bpe_ids[j])
-                else: 
-                    seq_len=len(attention_mask[j].nonzero())-2
-                bpe_mask=torch.tensor(['##' in w for w in s]).to(args.device)
-                h=h[1:1+seq_len]
-                a=a[1:1+seq_len,1:1+seq_len]
-                scores = split_score(h, a, bpe_mask, args.relevance_type, args.norm, args.inner_only)
+            bsz=len(hiddens)
+            for j in range(bsz):
+                heads=((5,10), (10,6), (11,0))
+                avg_scores=[]
+                for layer, head in heads:
+                    a=attentions[layer][:,head][j]
+                    s=strings[j]
+                    if args.remove_bpe:
+                        a=remove_bpe_from_attention(bpe_ids[j], a)
+                        seq_len=len(attention_mask[j].nonzero())-2-len(bpe_ids[j])
+                    else:
+                        seq_len=len(attention_mask[j].nonzero())-2
+                    bpe_mask=torch.tensor(['##' in w for w in s]).to(args.device)
+                    a=a[1:1+seq_len,1:1+seq_len]
+                    scores = split_score(None, a, bpe_mask, args.relevance_type, args.norm, args.inner_only)
+                    avg_scores.append(scores)
+                scores=sum(avg_scores)/len(avg_scores)
                 if args.decoding=='cky':
                     tree = parse_cyk(scores, s)
                 else:
@@ -141,7 +146,7 @@ def unsupervised_parsing(args, model, tokenizer, prefix=""):
 
     result = evalb(pred_tree_list, targ_tree_list)
     print(f'task:{args.task_name} model:{args.model_name_or_path}, layer nb:{args.layer_nb}, \
-head nb:{args.head_nb}, seed: {args.seed}, f1:{result["f1"]}',file=file_to_print,flush=True)
+head nb:{args.head_nb}, seed: {args.seed}, f1:{result["f1"]}, f1<10:{result["f1_10"]}', file=file_to_print,flush=True)
 
 def set_seed(args):
     random.seed(args.seed)
@@ -204,9 +209,9 @@ def parse_args():
     parser = argparse.ArgumentParser()
 
     # Required parameters
-    parser.add_argument("--model_name_or_path", default=None, type=str, required=True,
+    parser.add_argument("--model_name_or_path", default=None, type=str,
                         help="Path to pre-trained model or shortcut name selected in the list")
-    parser.add_argument("--task_name", default=None, type=str, choices=['train','val','test','wsj10'], required=True,
+    parser.add_argument("--task_name", default=None, type=str, choices=['train','val','test','wsj10'],
                         help="train or eval or parse")
     parser.add_argument("--output_dir", default=None, type=str,
                         help="The output directory where the model predictions and checkpoints will be written.")
@@ -317,6 +322,34 @@ def create_logger(args):
         file_handler = logging.FileHandler(filename=args.log_path, mode='w')
         logger.addHandler(file_handler)
 
+def save_text():
+    args=parse_args()
+    args.data_dir='data/multi-lingual/'
+    args.few_shot=-1
+    args.device=torch.device('cpu')
+    # all_langs='en zh ca de fr il jp sp sw'.split()
+    all_langs='zh'.split()
+    all_tasks='val test train'.split()
+    for lang in all_langs:
+        for task in all_tasks:
+            args.lang=lang
+            tokenizer=BertTokenizer.from_pretrained('bert-base-multilingual-uncased',do_lower_case=True,
+                                                    tokenize_chinese_chars=False,
+                                                    split_puntc=False
+            )
+            dataset=supervised_load_datasets(args, tokenizer, task=task)
+            eval_dataloader = DataLoader(dataset, batch_size=1, collate_fn=collate_fn)
+            all_sents=[]
+            with open(f'data/raw_text/{args.lang}.{task}.txt', 'w') as f:
+                for batch in eval_dataloader:
+                    tokens = [[tokenizer.convert_ids_to_tokens(id.item()) for id in ids[1:len(torch.nonzero(masks))-1]]
+                                for ids, masks in zip(batch[0], batch[1])]        
+                    strings = [tokenizer.convert_tokens_to_string(
+                                tks)+'\n' for tks in tokens]
+                    all_sents.extend(strings)
+                f.writelines(all_sents)
+        
+     
 
 if __name__ == "__main__":
     main()

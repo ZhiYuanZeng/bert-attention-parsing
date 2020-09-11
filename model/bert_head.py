@@ -1,7 +1,8 @@
 import torch.nn as nn
 import torch
 from typing import List
-from utils.data_utils import en_label2idx, en_idx2label
+import numpy as np
+import random
 
 # from sklearn.metrics import f1_score
 
@@ -36,6 +37,7 @@ class BertHead(nn.Module):
             )
         self.pred_label=pred_label
         self.loss_function=loss_function
+        
     def _span_embbedding(self,hiddens,i,j):
         hidden_size=hiddens.shape[-1]
         assert hidden_size%2==0
@@ -64,7 +66,7 @@ class BertHead(nn.Module):
         for bidx in range(len(hiddens)):
             seq_len=len(attention_mask[bidx].nonzero())-2-len(bpe_ids[bidx])
             if seq_len!=len(labels[bidx])+1:
-                print('error example')
+                print('error at bert_head.py: length of words is not equal to labels')
                 continue
             if self.rm_bpe_from_a:
                 a=attention[bidx]
@@ -83,6 +85,22 @@ class BertHead(nn.Module):
             a=torch.log(a+1e-6)
             span_list=labels[bidx]
             span_len=0
+            # # TODO: sample split point from all split points
+            # category={}
+            # tau=8
+            # for span in span_list:
+            #     start_idx, end_idx,split_idx=span[1]
+            #     if end_idx-start_idx<2: continue
+            #     if category.get(split_idx-start_idx) is None:
+            #         category[split_idx-start_idx]=[]
+            #     category[split_idx-start_idx].append(span)
+            # sample_prob=np.array([len(category[k]) for k in sorted(category.keys())])
+            # sample_prob=np.exp(sample_prob/tau)
+            # sample_prob=sample_prob/sample_prob.sum()
+            # for i in range(len(span_list)):
+            #     c=np.random.choice(list(category.keys()),1,p=sample_prob)
+            #     l, r,split_pos=random.choice(category[c.item()])[1]
+
             for span in span_list:
                 label,span=span
                 l,r,split_pos=span
@@ -107,9 +125,7 @@ class BertHead(nn.Module):
                     s_hat=scores[indices].max()
                     loss+=max(0,1+s_hat-scores[split_pos-l])
                     preds.append((scores.argmax(dim=-1)==(split_pos-l)).item())
-        # f1=f1_score(label_tgts,label_preds,average='weighted')
-        f1=sum([t==p for t,p in zip(label_tgts, label_preds)])/max(1,len(label_tgts))
-        return loss/len(hiddens),sum(preds)/max(len(preds),1),f1
+        return loss/len(hiddens),sum(preds)/max(len(preds),1),0.
     
     def forward(self, inputs , attention_mask, bpe_ids, labels, inner_only):
         """ return loss, average acc,f1 of multiple layers """
@@ -300,7 +316,7 @@ class BertHead(nn.Module):
                 cnt=1
             else:
                 cnt+=1
-                no_bpe_hiddens[i-1]=no_bpe_hiddens[i]/cnt+no_bpe_hiddens[i-1]*(cnt-1)/cnt
+                no_bpe_hiddens[i-1]=no_bpe_hiddens[i-1]/cnt+no_bpe_hiddens[i]*(cnt-1)/cnt
         non_bpe_ids.reverse()
         no_bpe_hiddens=torch.index_select(no_bpe_hiddens,dim=0,index=torch.tensor(non_bpe_ids).to(device))
         return no_bpe_hiddens
@@ -323,7 +339,8 @@ class BertHead(nn.Module):
                 cnt=1
                 non_bpe_ids.append(i)
             else:
-                no_bpe_attention[i-1]=no_bpe_attention[i]/cnt+no_bpe_attention[i-1]*(cnt-1)/cnt
+                cnt+=1
+                no_bpe_attention[i-1]=no_bpe_attention[i-1]/cnt+no_bpe_attention[i]*(cnt-1)/cnt
                 no_bpe_attention[:,i-1]=(no_bpe_attention[:,i]+no_bpe_attention[:,i-1])
         non_bpe_ids.reverse()
         assert len(non_bpe_ids)==(seq_len-len(bpe_ids))

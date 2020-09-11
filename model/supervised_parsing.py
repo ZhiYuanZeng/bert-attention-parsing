@@ -5,9 +5,8 @@ from model.bert_head import BertHead
 from utils.parse_utils import evalb, comp_tree
 # from dataloader.unsupervised_data import load_datasets as unsupervised_load_datasets
 from dataloader.supervised_data import load_datasets as supervised_load_datasets
-from utils.parse_comparison import corpus_stats_labeled, corpus_average_depth
 from utils.data_utils import collate_fn, en_label2idx
-from utils.visualize import visual_attention,visual_hiddens
+# from utils.visualize import visual_attention,visual_hiddens
 
 from transformers import BertConfig, BertModel, BertTokenizer,AdamW
 from transformers import WarmupLinearSchedule as get_linear_schedule_with_warmup
@@ -249,16 +248,13 @@ def test(args, model, tokenizer,prefix=''):
                 for ids, masks in zip(inputs,attention_mask)] # detokenize
             sents=[tokenizer.convert_tokens_to_string(s).split()
                      for s in sents] # remove bpe
-            if flat_tree(trees[0])!=sents[0]:
-                print('error tree')
-                continue
             pred_trees, all_attens, all_keys, all_querys = model.parse(
                 inputs, attention_mask,bpe_ids, sents, args.rm_bpe_from_a,args.decoding, inner_only=args.inner_only)
             all_pred_trees.extend(pred_trees)
-            for i,(a,s) in enumerate(zip(all_attens, sents)):
-                if ' '.join(s).startswith('under an agreement signed'):
-                    visual_attention([np.exp(a),],[s,],'attention-frozen.svg')
-                    pass
+            # for i,(a,s) in enumerate(zip(all_attens, sents)):
+            #     if ' '.join(s).startswith('under an agreement signed'):
+            #         visual_attention([np.exp(a),],[s,],'attention-frozen.svg')
+            #         pass
             # visual_hiddens(query, key, sents)
             # visual_hiddens(all_querys, all_keys, sents)
             # visual_attention(all_attens, sents)
@@ -276,10 +272,8 @@ def test(args, model, tokenizer,prefix=''):
     checkpoint_dir='/'.join(re.split('/*',args.checkpoint_path)[:-1])
     output_eval_file = os.path.join(checkpoint_dir, "parse_results.txt")
     with open(output_eval_file, "a") as writer:
-        logger.info("***** parse results {} *****".format(prefix))
-        writer.write("***** parse results {} *****".format(prefix))
+        writer.write("***** parse results {} *****\n".format(prefix))
         for key in sorted(eval_res.keys()):
-            logger.info("  %s = %s", key, str(eval_res[key]))
             writer.write("%s = %s\n" % (key, str(eval_res[key])))
 
     return eval_res
@@ -329,6 +323,18 @@ def main():
     # Setup logging
     create_logger(args)
     config_class, model_class, tokenizer_class = BertConfig, BertModel, BertTokenizer
+    if args.multi_lingual:
+        args.tokenizer_name='bert-base-multilingual-uncased'
+        args.config_name='bert-base-multilingual-uncased'
+        args.data_dir='data/multi-lingual'
+    elif args.lang=='en':
+        args.tokenizer_name='bert-base-uncased'
+        args.config_name='bert-base-uncased'
+        args.data_dir='data/en'
+    elif args.lang=='zh':
+        args.tokenizer_name='bert-base-chinese'
+        args.config_name='bert-base-chinese'
+        args.data_dir='data/zh'
     tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name if args.tokenizer_name else args.model_name_or_path,
                                                 do_lower_case=args.do_lower_case,
                                                 cache_dir=args.cache_dir if args.cache_dir else None,
@@ -352,10 +358,12 @@ def main():
                                             config=config, 
                                             cache_dir=args.cache_dir if args.cache_dir else None)
     if checkpoint is not None and checkpoint.get('args') is not None:
-        dropout,max_steps=args.dropout,args.max_steps
+        max_steps,lang,max_seq_len, checkpoint_path=args.max_steps,args.lang,args.max_seq_length, args.checkpoint_path
         args=checkpoint['args']
         args.task_name,args.max_steps=task_name,max_steps
-        args.dropout=dropout
+        args.lang=lang
+        args.max_seq_length=max_seq_len
+        args.checkpoint_path=checkpoint_path
         if not hasattr(args, 'is_supervised'): args.is_supervised=True
         if not hasattr(args, 'lang'): args.lang='en'
         if not hasattr(args, 'rm_bpe_from_a'): args.rm_bpe_from_a=False
@@ -364,26 +372,23 @@ def main():
         if not hasattr(args, 'inner_only'): args.inner_only=False
         print(args.layer_nb)
     logger.info("arguments: %s", args)
-    if args.is_supervised:
-        if args.frozen_bert and task_name=='train':
-            for param in bert_model.parameters():
-                param.requires_grad_(False)
+    if args.frozen_bert and task_name=='train':
+        for param in bert_model.parameters():
+            param.requires_grad_(False)
 
-        model=BertHead(bert_model, config.hidden_size,args.head_count,args.layer_nb,args.dropout,
-                    args.loss_function, args.rm_bpe_from_a,len(en_label2idx) if args.pred_label else 0)
-        if checkpoint is not None:
-            if checkpoint.get('key') is not None and checkpoint.get('query') is not None:
-                if isinstance(args.layer_nb, int):
-                    model.key_proj[0].load_state_dict(checkpoint['key'])
-                    model.query_proj[0].load_state_dict(checkpoint['query'])
-                else:
-                    model.key_proj.load_state_dict(checkpoint['key'])
-                    model.query_proj.load_state_dict(checkpoint['query'])
+    model=BertHead(bert_model, config.hidden_size,args.head_count,args.layer_nb,args.dropout,
+                args.loss_function, args.rm_bpe_from_a,len(en_label2idx) if args.pred_label else 0)
+    if checkpoint is not None:
+        if checkpoint.get('key') is not None and checkpoint.get('query') is not None:
+            if isinstance(args.layer_nb, int):
+                model.key_proj[0].load_state_dict(checkpoint['key'])
+                model.query_proj[0].load_state_dict(checkpoint['query'])
+            else:
+                model.key_proj.load_state_dict(checkpoint['key'])
+                model.query_proj.load_state_dict(checkpoint['query'])
 
-            if checkpoint.get('bert') is not None: model.bert.load_state_dict(checkpoint['bert'])
-            if checkpoint.get('label_predictor') is not None: model.label_predictor.load_state_dict(checkpoint['label_predictor'])
-    else:
-        model=bert_model
+        if checkpoint.get('bert') is not None: model.bert.load_state_dict(checkpoint['bert'])
+        if checkpoint.get('label_predictor') is not None: model.label_predictor.load_state_dict(checkpoint['label_predictor'])
     model=model.to(device)
     if task_name=='train':
         train(args, model, tokenizer, checkpoint)
@@ -445,7 +450,6 @@ def parse_args():
                         default='', help="For distant debugging.")
     parser.add_argument('--log_path', type=str,
                         default='', help="For distant debugging.")
-    parser.add_argument('--head_nb', type=int, default='-1', help="head number for parsing")
     parser.add_argument('--wsj10', action='store_true', help="test on wsj10")
     parser.add_argument('--inner_only', action='store_true',help="whether to only compute inside score")
     parser.add_argument('--decoding', type=str, default='cky', choices=['cky','greedy'] ,help="decoding method, cky/greedy")
@@ -460,12 +464,14 @@ def parse_args():
     parser.add_argument('--embedding_type', type=str, default='bert-base', choices=['bert-base','bert-large','glove','elmo'])
     parser.add_argument('--negative_sample', type=int, default=2, help='negative sampling number')
     parser.add_argument('--head_count', type=int, default=1, help='how many heads, make sense in supervised mode')
-    parser.add_argument('--lang', type=str, default='en', choices=['en','zh'], help='train/parse on ptb or ctb data')
+    parser.add_argument('--lang', type=str, default='en', choices=['en','zh','fr','jp','il','de','sw','sp','ca'],
+         help='train/parse on ptb or ctb data')
     parser.add_argument('--use_bert_head', type=int, default=-1, help='use which bert head, default not use')
     parser.add_argument('--loss_function', type=str, default='mle', choices=['mle','hinge'] ,help='use hinge loss or mle loss(cross entropy)')
     parser.add_argument('--pred_label', action='store_true', help='whther to predict label')
     parser.add_argument('--layer_nb', nargs='+', help='use which layers')
     parser.add_argument('--early_stop', type=int, default=-1, help='patience of early stop')
+    parser.add_argument('--multi_lingual', action='store_true', help='use multi-lingual BERT')
 
     args = parser.parse_args()
 

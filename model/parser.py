@@ -1,6 +1,6 @@
 import numpy as np
 import random
-import math
+import torch
 
 def _get_entropy(score):
     score=np.exp(score)
@@ -17,57 +17,64 @@ def parse_cyk(split_score,sent):
     def build_tree(splits,sent,i,j):
         if i==j:
             return sent[i]
+        if torch.all(split_score[i,j,i:j]==float('-inf')):
+            return ' '.join(sent[i:j+1]).replace(' ##','')
         tree=[]
         k=int(splits[i,j])
+        assert k!=-1
         tree.append(build_tree(splits,sent,i,k))
         tree.append(build_tree(splits,sent,k+1,j))
         return tree
 
     L=len(sent)
-    splits=np.zeros([L,L])
+    splits=np.zeros([L,L])-1
     tree_score=np.zeros([L,L])
     for w in range(2,L+1): # [2,L]
         for i in range(L):
             j=i+w-1
             if j>=L: continue
             maxv=float('-inf')
-            # split_score_one_span=np.zeros([j-i])
-            for k in range(i,j): # [i,j)
-                s=split_score[i,j,k]
-                s+=tree_score[i,k]+tree_score[k+1,j]
-                # split_score_one_span[k-i]=s
-                if maxv<s:
-                    splits[i,j]=k
-                    maxv=s
-            tree_score[i,j]=maxv
-            # entropy_of_score=_get_entropy(split_score_one_span)
-            # if entropy_of_score>math.log(j-i)*0.8:
-            #     splits[i,j]=i
+
+            if i!=0 and split_score[i-1,i,i-1].item()==float('-inf'): 
+                continue
+            if j!=L-1 and split_score[j,j+1,j].item()==float('-inf'): 
+                continue
+
+            if torch.all(split_score[i,j,i:j]==float('-inf')):
+                tree_score[i,j]=0
+            else:
+                for k in range(i,j): # [i,j)
+                    if split_score[i,j,k].item()==float('-inf') or tree_score[i,k].item()==float('-inf') or \
+                        tree_score[k+1,j].item()==float('-inf'): continue
+                    s=split_score[i,j,k].item()
+                    s+=tree_score[i,k].item()+tree_score[k+1,j].item()
+                    
+                    if maxv<s:
+                        splits[i,j]=k
+                        maxv=s
+                tree_score[i,j]=maxv
     tree=build_tree(splits,sent,0,L-1) 
     return tree
         
 
-def parse_greedy(scores,sents):
+def parse_greedy(split_score,sent):
     """ 
     parse tree using greedy
-    * scores:(bsz,m,m)
+    * split_score:(bsz,m,m)
 
     """
-    def parse_one_sample(score,sent,i,j):
+    def parse(i,j):
         if i==j:
             return sent[i]
+        if torch.all(split_score[i,j,i:j]==float('-inf')):
+            return ' '.join(sent[i:j+1]).replace(' ##','')
         else:
             tree=[]
-            max_ix=np.argmax(score[i,j,i:j])+i 
-            tree.append(parse_one_sample(score,sent,i,max_ix))
-            tree.append(parse_one_sample(score,sent,max_ix+1,j))
-        return tree 
-
-    trees=[]  
-    for score,sent in zip(scores,sents):
-        trees.append(parse_one_sample(score,sent,0,len(score)-1))
-    
-    return trees
+            max_ix=torch.argmax(split_score[i,j,i:j])+i
+            tree.append(parse(i,max_ix))
+            tree.append(parse(max_ix+1,j))
+        return tree
+    return parse(0,len(sent)-1)
 
 
 def random_tree(sent):
